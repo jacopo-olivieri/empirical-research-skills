@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,15 @@ import severity_tokens
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 OBLIGATIONS_PATH = SCRIPT_DIR / "stage_obligations.json"
+CERTIFIED_REGISTER_EVIDENCE = {
+    "b0": (
+        "claims_register.md", "output_register.md", "code_error_register.md"),
+    "claims_b4": ("claims_register.md", "output_register.md"),
+    "claims_b5": ("claims_register.md", "output_register.md"),
+    "code_b4": ("code_error_register.md",),
+    "code_b5": ("code_error_register.md",),
+}
+CERTIFIED_EVIDENCE_VERSION = 1
 
 FULL_STAGES = (
     "b0",
@@ -86,6 +96,11 @@ class CertificationError(RuntimeError):
     """A command cannot safely perform its requested state transition."""
 
 
+def _is_certified_evidence_version(value):
+    """Accept only the exact JSON integer version, never bools or floats."""
+    return type(value) is int and value == CERTIFIED_EVIDENCE_VERSION
+
+
 def canonical_package_root(path):
     root = Path(path).expanduser().resolve()
     if not root.is_dir():
@@ -138,6 +153,133 @@ def _sha256_file(path):
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _certified_evidence_dir(audit, stage):
+    return audit / "_run" / "certified_stage_evidence" / stage
+
+
+def _write_bytes_atomic(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _capture_certified_stage_evidence(package_root, stage, entry):
+    """Freeze and hash the mutable register inputs accepted for one stage."""
+    filenames = CERTIFIED_REGISTER_EVIDENCE.get(stage)
+    if filenames is None:
+        return
+    audit, _, _, _ = audit_paths(package_root)
+    evidence_dir = _certified_evidence_dir(audit, stage)
+    digests = {}
+    for filename in filenames:
+        source = audit / filename
+        if source.is_symlink() or not source.is_file():
+            raise CertificationError(
+                f"cannot freeze certified evidence for {stage}: "
+                f"{source} is not a regular file"
+            )
+        try:
+            payload = source.read_bytes()
+        except OSError as exc:
+            raise CertificationError(
+                f"cannot freeze certified evidence for {stage}: {source}: {exc}"
+            ) from exc
+        if not payload:
+            raise CertificationError(
+                f"cannot freeze certified evidence for {stage}: {source} is empty"
+            )
+        destination = evidence_dir / filename
+        _write_bytes_atomic(destination, payload)
+        digests[filename] = hashlib.sha256(payload).hexdigest()
+    entry["certified_evidence"] = {
+        "version": CERTIFIED_EVIDENCE_VERSION,
+        "registers": digests,
+    }
+
+
+def _certified_stage_evidence_failures(package_root, manifest, stage, entry):
+    filenames = CERTIFIED_REGISTER_EVIDENCE.get(stage)
+    if filenames is None:
+        return []
+    failures = []
+    if not _is_certified_evidence_version(
+            manifest.get("certified_stage_evidence_version")):
+        failures.append(
+            f"run is missing certified stage-era evidence version "
+            f"{CERTIFIED_EVIDENCE_VERSION}"
+        )
+    metadata = entry.get("certified_evidence")
+    if not isinstance(metadata, dict):
+        failures.append(
+            f"stage {stage!r} is missing certified stage-era evidence")
+        return failures
+    if not _is_certified_evidence_version(metadata.get("version")):
+        failures.append(
+            f"stage {stage!r} has unsupported certified evidence version "
+            f"{metadata.get('version')!r}"
+        )
+        return failures
+    registers = metadata.get("registers")
+    expected_names = set(filenames)
+    if not isinstance(registers, dict) or set(registers) != expected_names:
+        failures.append(
+            f"stage {stage!r} certified register evidence is malformed; "
+            f"expected exactly {sorted(expected_names)}"
+        )
+        return failures
+    audit, _, _, _ = audit_paths(package_root)
+    evidence_dir = _certified_evidence_dir(audit, stage)
+    for filename in filenames:
+        path = evidence_dir / filename
+        expected_digest = registers.get(filename)
+        if (not isinstance(expected_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+                or path.is_symlink()
+                or not path.is_file()):
+            failures.append(
+                f"stage {stage!r} certified evidence is missing or malformed: {path}"
+            )
+            continue
+        try:
+            actual_digest = _sha256_file(path)
+        except OSError as exc:
+            failures.append(
+                f"stage {stage!r} certified evidence cannot be read: {path}: {exc}"
+            )
+            continue
+        if actual_digest != expected_digest:
+            failures.append(
+                f"stage {stage!r} certified evidence was edited after certification: "
+                f"{path}"
+            )
+    return failures
+
+
+def _certified_evidence_root_failures(manifest):
+    """Require the run-level evidence contract for every initialized run."""
+    stages = manifest.get("stages")
+    if not isinstance(stages, dict):
+        return []
+    if not _is_certified_evidence_version(
+            manifest.get("certified_stage_evidence_version")):
+        return [
+            f"run is missing certified stage-era evidence version "
+            f"{CERTIFIED_EVIDENCE_VERSION}"
+        ]
+    return []
 
 
 def compute_tree_fingerprint(package_root, manifest):
@@ -272,6 +414,7 @@ def init_run(package_root, clear_stale_marker=False):
         raise CertificationError(str(exc)) from exc
     replace_running_marker(package_root, clear_stale_marker)
     manifest["run_identity"] = make_run_identity(package_root, manifest)
+    manifest["certified_stage_evidence_version"] = CERTIFIED_EVIDENCE_VERSION
     manifest["stages"] = {
         stage: {"status": "pending", "retries": 0, "shards": {}}
         for stage in stages
@@ -421,6 +564,9 @@ def _validator_commands(identifier, package_root, audit, stage_entry_value, stag
         "--stage", lint_stage,
         "--audit-dir", str(audit),
     ]
+    if stage_entry_value.get("_use_certified_evidence"):
+        evidence_dir = _certified_evidence_dir(audit, stage)
+        base.extend(["--stage-evidence-dir", str(evidence_dir)])
     if identifier not in SHARD_VALIDATORS:
         return [base]
     shards = stage_entry_value.get("shards")
@@ -474,7 +620,9 @@ def _run_validator(identifier, package_root, audit, stage_entry_value):
     return failures
 
 
-def resolve_stage_obligations(package_root, manifest, stage, table=None):
+def resolve_stage_obligations(
+        package_root, manifest, stage, table=None,
+        use_certified_evidence=False):
     table = load_obligations() if table is None else table
     if stage not in table:
         return [f"obligations table has no entry for stage {stage!r}"]
@@ -484,6 +632,11 @@ def resolve_stage_obligations(package_root, manifest, stage, table=None):
     audit, _, _, _ = audit_paths(package_root)
     entry = stage_entry(manifest, stage)
     failures = []
+    targeted_evidence_stage = stage in CERTIFIED_REGISTER_EVIDENCE
+    if use_certified_evidence and targeted_evidence_stage:
+        failures.extend(
+            _certified_stage_evidence_failures(
+                package_root, manifest, stage, entry))
     for obligation in obligations:
         if not isinstance(obligation, dict):
             failures.append(f"stage {stage!r} has a malformed obligation {obligation!r}")
@@ -519,7 +672,14 @@ def resolve_stage_obligations(package_root, manifest, stage, table=None):
             failures.extend(
                 _run_validator(
                     identifier, package_root, audit,
-                    {**entry, "_validator_stage": stage},
+                    {
+                        **entry,
+                        "_validator_stage": stage,
+                        "_use_certified_evidence": (
+                            use_certified_evidence
+                            and targeted_evidence_stage
+                        ),
+                    },
                 )
             )
         else:
@@ -568,6 +728,7 @@ def finish_stage(package_root, stage, outcome, reason=None):
         raise CertificationError(
             f"stage {stage!r} failed obligation(s): " + " | ".join(failures)
         )
+    _capture_certified_stage_evidence(package_root, stage, entry)
     entry["status"] = "done"
     entry.pop("reason", None)
     entry.pop("note", None)
@@ -712,13 +873,15 @@ def _write_code_b5_blocked_fallback(package_root, shard_path, reason,
 
 
 def verify_done_stages(package_root, manifest):
-    failures = []
+    failures = _certified_evidence_root_failures(manifest)
     stages = manifest.get("stages")
     if not isinstance(stages, dict):
         return ["manifest stages block is missing or not an object"]
     for stage, entry in stages.items():
         if isinstance(entry, dict) and entry.get("status") == "done":
-            for failure in resolve_stage_obligations(package_root, manifest, stage):
+            for failure in resolve_stage_obligations(
+                    package_root, manifest, stage,
+                    use_certified_evidence=True):
                 failures.append(f"stage {stage!r}: {failure}")
     return failures
 

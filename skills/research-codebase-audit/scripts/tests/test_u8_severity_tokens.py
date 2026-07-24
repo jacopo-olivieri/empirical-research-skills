@@ -493,6 +493,8 @@ def _completed_severity_tail(tmp_path):
         "severity_token_rulings": {"status": "done", "retries": 0},
         "b8": {"status": "done", "retries": 0},
     }
+    manifest["certified_stage_evidence_version"] = (
+        certify.CERTIFIED_EVIDENCE_VERSION)
     manifest["run_identity"] = certify.make_run_identity(root.resolve(), manifest)
     a.write("_run/manifest.json", json.dumps(manifest, indent=2) + "\n")
     return root, a

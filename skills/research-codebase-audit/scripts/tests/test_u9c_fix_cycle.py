@@ -16,10 +16,12 @@ import pytest
 
 import regbuild as rb
 import test_replay_harness as replay_helpers
+import test_u6_read_recall as u6read
 import test_u6_supplementary as u6
 
 
 ac = rb.load_script("check_argument_contracts")
+certify = rb.load_script("certify_stage")
 dm = rb.load_script("build_detector_mapping")
 lintmod = rb.load_script("lint_registers")
 mechanism = rb.load_script("mechanism_schema")
@@ -67,7 +69,7 @@ def _write_mapping(a, rows):
 
 
 def _minimal_b6_case(tmp_path, *, channel, source_id, witness_id, verdict,
-                     accepted, rule=None, stamp=None):
+                     accepted, rule=None, stamp=None, severity="2"):
     root = tmp_path / "package"
     root.mkdir()
     (root / "source.py").write_text("value = 1\n", encoding="utf-8")
@@ -102,7 +104,7 @@ def _minimal_b6_case(tmp_path, *, channel, source_id, witness_id, verdict,
             + verifier.manifests.MF_ZERO_LINE + "\n",
         )
     status = "not_error" if verdict == "not_error" else "confirmed"
-    severity = "" if verdict == "not_error" else "2"
+    severity = "" if verdict == "not_error" else severity
     description = stamp or "detector candidate description"
     final = rb.error_row(
         error_id, etype="missing_input_or_output", source="`source.py`",
@@ -341,6 +343,315 @@ def test_tier1_p26_post_b6a_strip_fails_b6b_and_verify_run_clis(tmp_path):
     verified = u6.cli(root, "verify-run")
     assert verified.returncode == 1
     assert "code_b6b" in verified.stderr
+
+
+def test_b6b_proposal_equality_survives_lawful_later_severity_cap(
+        tmp_path):
+    stamp = dm.argument_contract_stamp(
+        "passed_but_unread", "argpos:2", "source.py", "source.py", "2",
+        "source.py:1@call=0")
+    _root, a = _minimal_b6_case(
+        tmp_path, channel="AC", source_id=AC_SOURCE_ID,
+        witness_id="argpos:2", verdict="confirmed_error",
+        accepted=False, stamp=stamp, severity="3",
+    )
+    proposal = a.audit / "_run/snapshots/post_b6b/code_error_register.md"
+    proposal.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(a.audit / "code_error_register.md", proposal)
+    final = rb.error_row(
+        "E-7000", etype="missing_input_or_output", source="`source.py`",
+        location="source.py:1@call=0", status="confirmed", severity="2",
+        desc=stamp,
+    )
+    a.write_register("code_error_register.md", rb.ERROR_COLS, [final])
+
+    lawful_cap = lintmod.Lint()
+    lintmod.check_detector_mapping_b6(
+        lawful_cap, a.audit, proposal_path=proposal,
+        survival_path=a.audit / "code_error_register.md")
+    assert not lawful_cap.errors
+
+    a.write_register(
+        "code_error_register.md", rb.ERROR_COLS,
+        [rb.error_row(
+            "E-7000", etype="missing_input_or_output",
+            source="`source.py`", location="source.py:1@call=0",
+            status="confirmed", severity="2", desc="stamp removed",
+        )],
+    )
+    stripped = lintmod.Lint()
+    lintmod.check_detector_mapping_b6(
+        stripped, a.audit, proposal_path=proposal,
+        survival_path=a.audit / "code_error_register.md")
+    assert any("machine-written stamp" in error for error in stripped.errors)
+    assert not any("disagrees with applied proposal" in error
+                   for error in stripped.errors)
+
+
+@pytest.mark.parametrize("form", ["multi", "single", "zero"])
+def test_second_read_plan_accepts_sectioned_detector_mapping_forms(
+        tmp_path, form):
+    root, a = u6read.detector_chain(tmp_path)
+    _declared, _display, existing = dm.load_mapping(
+        a.audit / "_run/detector_mapping.md")
+    channels = {"DU": [], "MF": [], "CV": [], "AC": []}
+    if form != "zero":
+        channels[existing[0]["Channel"]].append(existing[0])
+    if form == "multi":
+        channels["DU"].append({
+            "Channel": "DU", "Source ID": "DU-0123456789ab",
+            "Witness ID": "DUW-0123456789ab", "Error ID": "E-7000",
+            "Mapping Kind": "existing_row",
+            "Site Anchor": "requirements-recall.txt:1",
+        })
+    a.write(
+        "_run/detector_mapping.md",
+        dm.render_mapping("E-7000–E-7099", channels),
+    )
+    current_rows = dm.parse_register(a.audit / "code_error_register.md")
+    a.write_register(
+        "_run/snapshots/code_b3b/code_error_register.md",
+        rb.ERROR_COLS,
+        [[row[column] for column in rb.ERROR_COLS]
+         for row in current_rows.values()],
+    )
+
+    built = rb.run_script(
+        "build_second_read_plan.py", root, "--audit-dir", a.audit)
+    assert built.returncode == 0, built.stdout + built.stderr
+    plan = a.audit / "plans/code_error_second_read_plan.md"
+    first = plan.read_bytes()
+    checked = rb.run_script(
+        "build_second_read_plan.py", root, "--audit-dir", a.audit, "--check")
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    rebuilt = rb.run_script(
+        "build_second_read_plan.py", root, "--audit-dir", a.audit)
+    assert rebuilt.returncode == 0, rebuilt.stdout + rebuilt.stderr
+    assert plan.read_bytes() == first
+
+
+def _finish_b0_with_certified_evidence(tmp_path):
+    a = rb.make_b0(tmp_path)
+    a.write_manifest(
+        allocation_override={"purpose": "development", "allocation": []})
+    certify.init_run(a.root)
+    certify.start_stage(a.root, "b0")
+    certify.finish_stage(a.root, "b0", "done")
+    return a
+
+
+def test_tier1_stage_era_b0_survives_tail_and_tamper_refuses_both_commands(
+        tmp_path):
+    a = _finish_b0_with_certified_evidence(tmp_path)
+    claim = rb.claims_row(
+        "C-0001", status="unclear", severity="2",
+        issue="candidate-era issue")
+    a.write_register("claims_register.md", rb.CLAIMS_COLS, [claim])
+    a.write_register("output_register.md", rb.OUTPUT_COLS, [])
+    plan = rb.recheck_plan_text(
+        "claims",
+        [("C-0001", "issue-flagged", "static")],
+        [("K1", "cluster one", "C-0001", "`audit/_recheck/k1.md`")],
+    )
+    a.write("plans/claims_recheck_plan.md", plan)
+    shard = a.write(
+        "_recheck/k1.md",
+        rb.register_text(
+            "Recheck ledger", rb.LEDGER_COLS,
+            [rb.ledger_row(
+                "C-0001", status="unclear", severity="2",
+                verdict="substantiated")],
+        )
+        + rb._shard_footer_text([]),
+    )
+    certify.start_stage(a.root, "claims_b4")
+    certify.finish_stage(a.root, "claims_b4", "done")
+    certify.start_stage(a.root, "claims_b5")
+    certify.set_shard(
+        a.root, "claims_b5", f"audit/{shard.relative_to(a.audit)}", "done")
+    certify.finish_stage(a.root, "claims_b5", "done")
+
+    rewritten_columns, rewritten_rows = rb.rewrite_pass_cols(
+        rb.CLAIMS_COLS,
+        [rb.claims_row(
+            "C-0001", status="confirmed", severity="2",
+            issue="final author-facing issue")],
+        ["Issue Description"],
+    )
+    a.write_register(
+        "claims_register.md", rewritten_columns, rewritten_rows)
+    a.write_register(
+        "code_error_register.md", rb.ERROR_COLS,
+        [rb.error_row("E-0001", severity="2")])
+
+    certify.verify_run(a.root)
+    certify.resume_check(a.root, clear_stale_marker=True)
+
+    frozen = (
+        a.audit / "_run/certified_stage_evidence/b0/"
+        "code_error_register.md"
+    )
+    frozen.write_text(
+        frozen.read_text(encoding="utf-8") + "\nhand-flipped\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+            certify.CertificationError, match="edited after certification"):
+        certify.verify_run(a.root)
+    with pytest.raises(
+            certify.CertificationError, match="edited after certification"):
+        certify.resume_check(a.root, clear_stale_marker=True)
+
+
+@pytest.mark.parametrize(
+    ("stage", "filenames"),
+    sorted(certify.CERTIFIED_REGISTER_EVIDENCE.items()),
+)
+def test_stage_era_evidence_missing_and_malformed_fail_closed(
+        tmp_path, stage, filenames):
+    a = rb.AuditDir(tmp_path)
+    for filename in filenames:
+        columns = {
+            "claims_register.md": rb.CLAIMS_COLS,
+            "output_register.md": rb.OUTPUT_COLS,
+            "code_error_register.md": rb.ERROR_COLS,
+        }[filename]
+        a.write_register(filename, columns, [])
+    entry = {}
+    certify._capture_certified_stage_evidence(a.root, stage, entry)
+    manifest = {
+        "certified_stage_evidence_version":
+            certify.CERTIFIED_EVIDENCE_VERSION,
+    }
+    assert not certify._certified_stage_evidence_failures(
+        a.root, manifest, stage, entry)
+
+    evidence_dir = certify._certified_evidence_dir(a.audit, stage)
+    (evidence_dir / filenames[0]).unlink()
+    failures = certify._certified_stage_evidence_failures(
+        a.root, manifest, stage, entry)
+    assert any("missing or malformed" in failure for failure in failures)
+
+    malformed = {
+        "certified_evidence": {
+            "version": certify.CERTIFIED_EVIDENCE_VERSION,
+            "registers": {},
+        }
+    }
+    failures = certify._certified_stage_evidence_failures(
+        a.root, manifest, stage, malformed)
+    assert any("expected exactly" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    "deleted", ["root-marker", "stage-binding", "both"])
+def test_stage_era_binding_deletions_refuse_verify_and_resume(
+        tmp_path, deleted):
+    a = _finish_b0_with_certified_evidence(tmp_path)
+    manifest = certify.read_manifest(a.root)
+    if deleted in {"root-marker", "both"}:
+        manifest.pop("certified_stage_evidence_version")
+    if deleted in {"stage-binding", "both"}:
+        manifest["stages"]["b0"].pop("certified_evidence")
+    certify.write_manifest_atomic(a.root, manifest)
+
+    with pytest.raises(
+            certify.CertificationError,
+            match="missing certified stage-era evidence"):
+        certify.verify_run(a.root)
+    with pytest.raises(
+            certify.CertificationError,
+            match="missing certified stage-era evidence"):
+        certify.resume_check(a.root, clear_stale_marker=True)
+
+
+def test_pending_only_initialized_run_requires_root_evidence_version(
+        tmp_path):
+    a = rb.make_b0(tmp_path)
+    a.write_manifest(
+        allocation_override={"purpose": "development", "allocation": []})
+    certify.init_run(a.root)
+    manifest = certify.read_manifest(a.root)
+    assert all(
+        entry["status"] == "pending"
+        for entry in manifest["stages"].values()
+    )
+    manifest.pop("certified_stage_evidence_version")
+    certify.write_manifest_atomic(a.root, manifest)
+
+    with pytest.raises(
+            certify.CertificationError,
+            match="missing certified stage-era evidence"):
+        certify.verify_run(a.root)
+    with pytest.raises(
+            certify.CertificationError,
+            match="missing certified stage-era evidence"):
+        certify.resume_check(a.root, clear_stale_marker=True)
+
+
+@pytest.mark.parametrize(
+    "invalid_version", [True, 1.0],
+    ids=["boolean", "float"],
+)
+def test_pending_only_initialized_run_rejects_type_wrong_root_version(
+        tmp_path, invalid_version):
+    a = rb.make_b0(tmp_path)
+    a.write_manifest(
+        allocation_override={"purpose": "development", "allocation": []})
+    certify.init_run(a.root)
+    manifest = certify.read_manifest(a.root)
+    manifest["certified_stage_evidence_version"] = invalid_version
+    certify.write_manifest_atomic(a.root, manifest)
+
+    with pytest.raises(
+            certify.CertificationError,
+            match="missing certified stage-era evidence"):
+        certify.verify_run(a.root)
+    with pytest.raises(
+            certify.CertificationError,
+            match="missing certified stage-era evidence"):
+        certify.resume_check(a.root, clear_stale_marker=True)
+
+
+@pytest.mark.parametrize(
+    "invalid_version", [True, 1.0],
+    ids=["boolean", "float"],
+)
+def test_completed_stage_rejects_type_wrong_stage_evidence_version(
+        tmp_path, invalid_version):
+    a = _finish_b0_with_certified_evidence(tmp_path)
+    manifest = certify.read_manifest(a.root)
+    manifest["stages"]["b0"]["certified_evidence"][
+        "version"] = invalid_version
+    certify.write_manifest_atomic(a.root, manifest)
+
+    with pytest.raises(
+            certify.CertificationError,
+            match="unsupported certified evidence version"):
+        certify.verify_run(a.root)
+    with pytest.raises(
+            certify.CertificationError,
+            match="unsupported certified evidence version"):
+        certify.resume_check(a.root, clear_stale_marker=True)
+
+
+def test_stage_era_test3_breaking_selector_makes_late_canon_fail(
+        tmp_path, monkeypatch):
+    a = _finish_b0_with_certified_evidence(tmp_path)
+    a.write_register(
+        "code_error_register.md", rb.ERROR_COLS,
+        [rb.error_row("E-0001", severity="2")])
+    monkeypatch.setattr(
+        certify, "_certified_stage_evidence_failures",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        certify, "_certified_evidence_dir",
+        lambda audit, _stage: audit,
+    )
+    with pytest.raises(
+            certify.CertificationError, match="register must be empty at b0"):
+        certify.verify_run(a.root)
 
 
 def test_d03_matcher_stays_quiet_on_preserved_p18_row_and_keeps_plant_hits():
@@ -630,6 +941,540 @@ def test_tier1_p28_b7_to_rulings_cli_caps_borrowed_tie(tmp_path):
     assert checked.returncode == 0, checked.stdout + checked.stderr
     final = tokens._load_register_error_rows(a.audit)
     assert final["E-0011"]["Severity"] == "2"
+
+
+def test_rulings_snapshot_tamper_refuses_finish_without_mutating_canon(
+        tmp_path):
+    root, a, _manifest = _p28_fixture(
+        tmp_path, verdict="rejected")
+    manifest = certify.read_manifest(root)
+    manifest["allocation_override"] = {
+        "purpose": "development", "allocation": []}
+    certify.write_manifest_atomic(root, manifest)
+    certify.init_run(root)
+    manifest = certify.read_manifest(root)
+    manifest["stages"]["b7"]["status"] = "done"
+    certify.write_manifest_atomic(root, manifest)
+    certify.start_stage(root, "severity_token_rulings")
+    worklist = json.loads(
+        (a.audit / rulings.WORKLIST_PATH).read_text(encoding="utf-8"))
+    a.write("_run/severity_token_rulings.json", json.dumps({
+        "schema": rulings.RULINGS_SCHEMA,
+        "cycle": "main",
+        "b7_certification_sha256": worklist["b7_certification_sha256"],
+        "rulings": [{
+            "error_id": "E-0011", "token": "output:O-0121",
+            "b7_verdict": "rejected", "ruling": "cap",
+            "resulting_status": "dismissed", "resulting_severity": 2,
+            "rationale": "tampered snapshot launders an unauthorized status",
+            "decision_identity": "operator-test",
+        }],
+    }, indent=2) + "\n")
+    canonical = a.audit / "code_error_register.md"
+    before = canonical.read_bytes()
+    snapshot = a.audit / rulings.SNAPSHOT_REGISTER
+    snapshot.write_text(
+        snapshot.read_text(encoding="utf-8").replace(
+            "| confirmed | 3 |", "| dismissed | 2 |", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+            certify.CertificationError, match="snapshot digest mismatch"):
+        certify.finish_stage(root, "severity_token_rulings", "done")
+    assert canonical.read_bytes() == before
+    assert (
+        certify.read_manifest(root)["stages"]["severity_token_rulings"]["status"]
+        == "running"
+    )
+
+
+def _certify_public(root, stage, shard=None):
+    certify.start_stage(root, stage)
+    if shard is not None:
+        certify.set_shard(root, stage, shard, "done")
+    certify.finish_stage(root, stage, "done")
+
+
+def _complete_stage_era_tail(tmp_path):
+    root, a, _manifest = _p28_fixture(
+        tmp_path, verdict="rejected")
+    (root / "source.py").write_text("value = 1\n", encoding="utf-8")
+    a.write("audit_readme.md", "# Audit readme\n\nVocabulary and rules.\n")
+    a.write(
+        "CODEMAP.md",
+        "# CODEMAP\n\nS-0001 py/build_capita.py\n"
+        "D-0001 data/input.csv\nB-0001 build\n\nPRECONDITIONS: 5/5\n",
+    )
+    saved_output = (a.audit / "output_register.md").read_bytes()
+    a.write_register("claims_register.md", rb.CLAIMS_COLS, [])
+    a.write_register("output_register.md", rb.OUTPUT_COLS, [])
+    a.write_register("code_error_register.md", rb.ERROR_COLS, [])
+    a.write_manifest(
+        mode="replication", scope_exclusions=[], off_limits=[],
+        allocation_override={"purpose": "development", "allocation": []},
+    )
+    certify.init_run(root)
+    _certify_public(root, "b0")
+
+    # Build and certify the lint-green claims input that full-mode code-b4
+    # pins. The b3 merge carries the same row identities later dispositioned
+    # by b4/b5, matching a production run rather than minting them afterward.
+    claim_before = rb.claims_row(
+        "C-0001", status="unclear", severity="2",
+        issue="candidate-era issue")
+    claim_final = rb.claims_row(
+        "C-0001", status="inconsistent", severity="3",
+        issue="confirmed issue", related="E-0003")
+    output_rows = [
+        rb.output_row(
+            "O-0121", script="`py/table.py`",
+            location="`paper/paper.tex:1`"),
+    ]
+    a.write(
+        "plans/claims_review_plan.md",
+        "# Claims review plan\n\n"
+        "| Worker ID | Worker Scope | Claim ID Range | Output ID Range | Shard File |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| W1 | full paper | C-0001–C-0099 | O-0001–O-0999 | `audit/_work/w1.md` |\n\n"
+        "Merge-coordinator range: C-9000–C-9099\n"
+        "Merge-coordinator range: O-9000–O-9099\n",
+    )
+    claims_worker = (
+        rb.register_text("Claims", rb.CLAIMS_COLS, [claim_before])
+        + "\n" + rb.register_text("Outputs", rb.OUTPUT_COLS, output_rows)
+        + "\nCoverage: every assigned claim unit accounted for.\n"
+        + u6.footer([
+            ["OBS-0001", "candidate", "C-0001",
+             "claim row retained", ""],
+            ["OBS-0002", "candidate", "O-0121",
+             "output row retained", ""],
+        ])
+    )
+    a.write("_work/w1.md", claims_worker)
+    _certify_public(root, "claims_b2", "audit/_work/w1.md")
+    a.write_register("claims_register.md", rb.CLAIMS_COLS, [claim_before])
+    (a.audit / "output_register.md").write_bytes(saved_output)
+    a.write_register(
+        "_run/snapshots/claims_b3b/claims_register.md",
+        rb.CLAIMS_COLS, [claim_before])
+    shutil.copy2(
+        a.audit / "output_register.md",
+        a.audit / "_run/snapshots/claims_b3b/output_register.md")
+    a.write("_run/merge_report_claims.json", json.dumps({
+        "claims_register.md": {
+            "shard_rows": 1, "dedup_removed": 0, "added": 1,
+            "conflicts": [], "coverage_gaps": [], "blocked_shards": [],
+        },
+        "output_register.md": {
+            "shard_rows": len(output_rows), "dedup_removed": 0,
+            "added": len(output_rows),
+            "conflicts": [], "coverage_gaps": [], "blocked_shards": [],
+        },
+        "footer_dispositions": [
+            "audit/_work/w1.md#OBS-0001 | candidate:C-0001",
+            "audit/_work/w1.md#OBS-0002 | candidate:O-0121",
+        ],
+    }))
+    _certify_public(root, "claims_b3")
+
+    claims_plan = rb.recheck_plan_text(
+        "claims", [("C-0001", "issue-flagged", "paper")],
+        [("K1", "claims", "C-0001", "`audit/_recheck/k1.md`")])
+    a.write("plans/claims_recheck_plan.md", claims_plan)
+    a.write(
+        "_recheck/k1.md",
+        rb.register_text("Claims recheck", rb.LEDGER_COLS, [
+            rb.ledger_row(
+                "C-0001", status="unclear", severity="2",
+                verdict="substantiated", change="set status=inconsistent",
+                note="confirmed issue"),
+        ]) + u6.footer(),
+    )
+    _certify_public(root, "claims_b4")
+    _certify_public(root, "claims_b5", "audit/_recheck/k1.md")
+
+    # E-0003 carries both the AC survival obligation and the borrowed CV tie.
+    cv_source, cv_witness = "CV-267217db96d3", "CVW-774f1d1f861f"
+    ac_source, ac_witness = AC_SOURCE_ID, "argpos:2"
+    mapping_rows = [
+        _mapping_row(
+            "CV", cv_source, cv_witness, "E-0003",
+            "py/build_capita.py:line 17: `wage_pc = wage_earnings / age_head`"),
+        _mapping_row(
+            "AC", ac_source, ac_witness, "E-0003",
+            "source.py:1@call=0"),
+    ]
+    _write_mapping(a, mapping_rows)
+    a.write(
+        "_run/argument_contracts.md",
+        ac.render(_ac_artifact(ac_source, (ac_witness,))),
+    )
+    a.write("_run/definition_use_bundles.md", rb.definition_use_artifact([]))
+    a.write(
+        "_run/manifest_check.md",
+        "# Manifest parseability check\n\n"
+        + verifier.manifests.NO_FINDINGS_LINE + "\n"
+        + verifier.manifests.MF_ZERO_LINE + "\n",
+    )
+    stamp = dm.argument_contract_stamp(
+        "passed_but_unread", ac_witness, "source.py", "source.py", "2",
+        "source.py:1@call=0")
+    sidecar = mechanism.canonicalize_mechanism(
+        "variable_substitution", "age_head", "wrong_value", "hhsize",
+        "age_head", register="code_errors", anchor="py/build_capita.py:17",
+        projection=mechanism.EMPTY_PROJECTION,
+    ).sidecar
+    witness_ids = f"{cv_witness}; {ac_witness}"
+    candidate = rb.error_row(
+        "E-0003", etype="aggregation_or_unit_error",
+        source="`py/build_capita.py`; `py/table.py`; `source.py`",
+        location="py/build_capita.py:14", status="candidate", severity="3",
+        desc=f"wage_pc divides by age_head. {stamp}",
+        why="reported output is affected output:O-0121",
+        related="C-0001",
+    )
+    proposal = list(candidate)
+    proposal[rb.ERROR_COLS.index("Status")] = "confirmed"
+    digest = tokens.obligation_digest(
+        "E-0003", "output:O-0121", sidecar, witness_ids,
+        "py/build_capita.py:14", "age_head",
+    )
+    record = {
+        "Record Type": "token_verification", "Error ID": "E-0003",
+        "Token": "output:O-0121", "Obligation Digest": digest,
+        "Mechanism": sidecar, "Witness IDs": witness_ids,
+        "Error Location": "py/build_capita.py:14",
+        "Flawed Identifier": "age_head", "Cited Target": "O-0121",
+        "Lineage JSON": json.dumps([
+            {"anchor": "py/build_capita.py:14", "carries": "age_head"},
+            {"anchor": "py/table.py:1", "carries": "age_head"},
+        ], separators=(",", ":")),
+        "Probe Path": "probe.py",
+        "Probe Output SHA256": tokens.result_digest(0, b"", b""),
+        "Verdict": "verified", "Derived From Receipt ID": "—",
+    }
+    ledger = rb.code_ledger_row(
+        "E-0003", status="candidate", severity="3",
+        evidence=f"{cv_source}; {ac_source}",
+        verdict="confirmed_error", proposed_status="confirmed",
+        proposed_severity="3", accepted_type="aggregation_or_unit_error",
+        accepted_mechanism=sidecar, witness_ids=witness_ids,
+    )
+    outcomes = [
+        rb.witness_outcome_row(
+            channel, source, witness, verdict="confirmed_error",
+            severity="3", mech_class="variable_substitution",
+            mech_object="age_head", relation="wrong_value",
+            expected="hhsize", actual="age_head")
+        for channel, source, witness in (
+            ("CV", cv_source, cv_witness),
+            ("AC", ac_source, ac_witness),
+        )
+    ]
+    shard = a.write(
+        "_code_error_recheck/k1.md",
+        rb.register_text("Code recheck", rb.CODE_LEDGER_COLS, [ledger])
+        + "\n### Witness outcomes\n\n"
+        + rb.md_table(rb.WITNESS_OUTCOME_COLS, outcomes)
+        + "\n### Verification records\n\n"
+        + rb.md_table(tokens.TOKEN_RECORD_COLS, [[
+            record[column] for column in tokens.TOKEN_RECORD_COLS
+        ]])
+        + u6.footer(),
+    )
+    (shard.parent / "probe.py").write_text("pass\n", encoding="utf-8")
+    a.write_register("code_error_register.md", rb.ERROR_COLS, [candidate])
+    a.write(
+        "plans/code_error_recheck_plan.md",
+        rb.recheck_plan_text(
+            "code",
+            [("E-0003", "detector", f"{cv_source}; {ac_source}")],
+            [("K1", "code", "E-0003",
+              "`audit/_code_error_recheck/k1.md`")],
+        ),
+    )
+    a.write("plans/code_error_review_plan.md", rb._code_b1_plan())
+    a.write("plans/code_error_second_read_plan.md", "# Code second-read plan\n")
+    certify.start_stage(root, "code_b4")
+    pinned = rb.run_script(
+        "severity_tokens.py", "pin-dispatch-inputs", root,
+        "--audit-dir", a.audit)
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    certify.finish_stage(root, "code_b4", "done")
+    _certify_public(root, "code_b5", "audit/_code_error_recheck/k1.md")
+
+    # Claims b6 tail.
+    a.write_register(
+        "_run/snapshots/claims_b6a/claims_register.md",
+        rb.CLAIMS_COLS, [claim_before])
+    shutil.copy2(
+        a.audit / "output_register.md",
+        a.audit / "_run/snapshots/claims_b6a/output_register.md")
+    a.write_register(
+        "_run/snapshots/claims_b6b/claims_register.md",
+        rb.CLAIMS_COLS, [claim_final])
+    shutil.copy2(
+        a.audit / "output_register.md",
+        a.audit / "_run/snapshots/claims_b6b/output_register.md")
+    a.write_register("claims_register.md", rb.CLAIMS_COLS, [claim_final])
+    a.write(
+        "claims_recheck_summary.md",
+        "# Claims recheck summary\n\nSplits declared: 0\nMerges declared: 0\n"
+        "Discoveries declared: C=0; O=0; E=0\n")
+    a.write(
+        "plans/claims_second_read_plan.md",
+        "# Claims second-read plan\n")
+    a.write(
+        "plans/claims_supplementary_recheck_plan.md",
+        rb.recheck_plan_text("claims", [], [])
+        + f"\n{lintmod.SUPPLEMENTARY_EMPTY}\n")
+    a.write(
+        "claims_supplementary_recheck_summary.md",
+        "# Supplementary recheck summary\n")
+    a.write(
+        "late_observations_claims.md",
+        "# Late observations — claims\n\nNo late observations.\n\n"
+        "## Dispositions\n\nNo dispositions.\n")
+    _certify_public(root, "claims_b6a")
+    _certify_public(root, "claims_b5s")
+    _certify_public(root, "claims_b6b")
+
+    # Code b6 tail and its immutable proposal-3 snapshot.
+    a.write_register(
+        "_run/snapshots/code_b6a/code_error_register.md",
+        rb.ERROR_COLS, [candidate])
+    a.write_register("code_error_register.md", rb.ERROR_COLS, [proposal])
+    a.write_register("_staging/code_error_register.md", rb.ERROR_COLS, [proposal])
+    a.write(
+        "code_error_recheck_summary.md",
+        "# Code recheck summary\n\nSplits declared: 0\nMerges declared: 0\n"
+        "Discoveries declared: C=0; O=0; E=0\n")
+    a.write(
+        "plans/code_error_supplementary_recheck_plan.md",
+        u6.zero_supplementary_plan())
+    assert rb.run_script(
+        "verify_dismissals.py", root, "--audit-dir", a.audit).returncode == 0
+    assert rb.run_script(
+        "verify_dismissals.py", root, "--audit-dir", a.audit,
+        "--tokens").returncode == 0
+    assembled = rb.run_script(
+        "assemble_boundary.py", root, "--audit-dir", a.audit)
+    assert assembled.returncode == 0, assembled.stdout + assembled.stderr
+    a.write(
+        "_run/late_severity_residuals.md",
+        "# Late severity residuals\n\n"
+        + rb.md_table(tokens.RESIDUAL_COLS, []))
+    _certify_public(root, "code_b6a")
+    _certify_public(root, "code_b5s")
+    a.write_register(
+        "_run/snapshots/code_b6b/code_error_register.md",
+        rb.ERROR_COLS, [proposal])
+    a.write(
+        "code_error_supplementary_recheck_summary.md",
+        "# Supplementary recheck summary\n")
+    a.write("late_observations_code.md", u6.lo_artifact())
+    assert rb.run_script(
+        "verify_dismissals.py", root, "--audit-dir", a.audit,
+        "--supplementary").returncode == 0
+    assert rb.run_script(
+        "verify_dismissals.py", root, "--audit-dir", a.audit,
+        "--supplementary", "--tokens").returncode == 0
+    assembled = rb.run_script(
+        "assemble_boundary.py", root, "--audit-dir", a.audit,
+        "--supplementary")
+    assert assembled.returncode == 0, assembled.stdout + assembled.stderr
+    _certify_public(root, "code_b6b")
+
+    # b7 rejects the borrowed CV tie; the rulings stage lawfully caps 3 -> 2.
+    a.write_register(
+        "_run/snapshots/b7/claims_register.md",
+        rb.CLAIMS_COLS, [claim_final])
+    a.write_register(
+        "_run/snapshots/b7/code_error_register.md",
+        rb.ERROR_COLS, [proposal])
+    a.write_register(
+        "_staging/claims_register.md", rb.CLAIMS_COLS, [claim_final])
+    a.write_register(
+        "_staging/code_error_register.md", rb.ERROR_COLS, [proposal])
+    a.write(
+        "register_cross_link_summary.md",
+        "# Cross-link summary\n\n## Status conflicts\n\nnone\n\n"
+        "## Escalated mapped claims\n\nnone\n\n"
+        "## Severity divergences\n\nnone\n\n"
+        "## Severity-token adjudications\n\n"
+        + rb.md_table(tokens.ADJUDICATION_COLS, [[
+            "E-0003 output:O-0121", "O-0121", "rejected",
+            "py/table.py:1",
+        ]]),
+    )
+    _certify_public(root, "b7")
+    certify.start_stage(root, "severity_token_rulings")
+    worklist = json.loads(
+        (a.audit / rulings.WORKLIST_PATH).read_text(encoding="utf-8"))
+    a.write("_run/severity_token_rulings.json", json.dumps({
+        "schema": rulings.RULINGS_SCHEMA, "cycle": "main",
+        "b7_certification_sha256": worklist["b7_certification_sha256"],
+        "rulings": [{
+            "error_id": "E-0003", "token": "output:O-0121",
+            "b7_verdict": "rejected", "ruling": "cap",
+            "resulting_status": "confirmed", "resulting_severity": 2,
+            "rationale": "borrowed tie omits the wage_pc witness site",
+            "decision_identity": "operator-test",
+        }],
+    }, indent=2) + "\n")
+    certify.finish_stage(root, "severity_token_rulings", "done")
+    assert tokens._load_register_error_rows(a.audit)["E-0003"]["Severity"] == "2"
+
+    capped = list(proposal)
+    capped[rb.ERROR_COLS.index("Severity")] = "2"
+    # Faithful production b8 (pipeline-finalize b8 steps 1-4): snapshot canon
+    # (the applied post-rulings register) byte-for-byte into the b8 boundary,
+    # dispatch the author-facing rewrite into `_staging/`, then PROMOTE BY COPY
+    # — the rewritten staging registers over canon. The earlier fixture omitted
+    # this last promotion step, so the completed rulings stage's require_applied
+    # replay still saw the un-rewritten canon and passed falsely; the honest
+    # replay binds instead to b8's pre-rewrite snapshot.
+    (a.audit / "_run/snapshots/b8").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        a.audit / "claims_register.md",
+        a.audit / "_run/snapshots/b8/claims_register.md")
+    shutil.copy2(
+        a.audit / "code_error_register.md",
+        a.audit / "_run/snapshots/b8/code_error_register.md")
+    claims_cols, claims_rows = rb.rewrite_pass_cols(
+        rb.CLAIMS_COLS, [claim_final], ["Issue Description"])
+    error_cols, error_rows = rb.rewrite_pass_cols(
+        rb.ERROR_COLS, [capped], ["Error Description", "Why It Matters"])
+    a.write_register("_staging/claims_register.md", claims_cols, claims_rows)
+    a.write_register("_staging/code_error_register.md", error_cols, error_rows)
+    shutil.copy2(
+        a.audit / "_staging/claims_register.md",
+        a.audit / "claims_register.md")
+    shutil.copy2(
+        a.audit / "_staging/code_error_register.md",
+        a.audit / "code_error_register.md")
+    _certify_public(root, "b8")
+    manifest = certify.read_manifest(root)
+    required_done = {
+        "b0", "claims_b4", "claims_b5", "code_b4", "code_b5",
+        "claims_b6b", "code_b6b", "b7", "severity_token_rulings", "b8",
+    }
+    assert {
+        stage for stage in required_done
+        if manifest["stages"][stage]["status"] == "done"
+    } == required_done
+    return root, a
+
+
+def test_tier1_complete_stage_era_tail_verifies_then_refuses_tamper(tmp_path):
+    root, a = _complete_stage_era_tail(tmp_path)
+    certify.verify_run(root)
+    certify.resume_check(root, clear_stale_marker=True)
+    frozen = (
+        a.audit / "_run/certified_stage_evidence/code_b5/"
+        "code_error_register.md")
+    frozen.write_text(
+        frozen.read_text(encoding="utf-8") + "\nhand-flipped\n",
+        encoding="utf-8")
+    with pytest.raises(
+            certify.CertificationError, match="edited after certification"):
+        certify.verify_run(root)
+    with pytest.raises(
+            certify.CertificationError, match="edited after certification"):
+        certify.resume_check(root, clear_stale_marker=True)
+
+
+def test_complete_tail_refuses_post_certification_rulings_snapshot_tamper(
+        tmp_path):
+    root, a = _complete_stage_era_tail(tmp_path)
+    snapshot = a.audit / rulings.SNAPSHOT_REGISTER
+    snapshot.write_text(
+        snapshot.read_text(encoding="utf-8").replace(
+            "| confirmed | 3 |", "| confirmed | 2 |", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+            certify.CertificationError, match="snapshot digest mismatch"):
+        certify.verify_run(root)
+    with pytest.raises(
+            certify.CertificationError, match="snapshot digest mismatch"):
+        certify.resume_check(root, clear_stale_marker=True)
+
+
+def test_rulings_replay_fails_closed_when_b8_applied_snapshot_absent(tmp_path):
+    """Once b8 is done the rulings replay binds to b8's pre-rewrite snapshot;
+    with that stage-era boundary gone it must refuse rather than fall back to
+    the post-b8 canonical register (which no longer proves the apply)."""
+    root, a = _complete_stage_era_tail(tmp_path)
+    (a.audit / rulings.B8_SNAPSHOT_REGISTER).unlink()
+    manifest = certify.read_manifest(root)
+    _decisions, failures = rulings.validate_rulings(
+        root, a.audit, manifest, require_applied=True)
+    assert any(
+        "pre-rewrite register snapshot is missing" in failure
+        for failure in failures), failures
+    with pytest.raises(certify.CertificationError):
+        certify.verify_run(root)
+    with pytest.raises(certify.CertificationError):
+        certify.resume_check(root, clear_stale_marker=True)
+
+
+def test_complete_tail_refuses_tampered_b8_applied_snapshot(tmp_path):
+    """A byte edit to b8's frozen boundary that its own value-level rewrite
+    lint cannot see (trailing content outside the table) must still be caught
+    by the rulings stage-era byte comparison under both verify commands."""
+    root, a = _complete_stage_era_tail(tmp_path)
+    snapshot = a.audit / rulings.B8_SNAPSHOT_REGISTER
+    snapshot.write_bytes(
+        snapshot.read_bytes() + b"\n<!-- tampered applied evidence -->\n")
+    with pytest.raises(
+            certify.CertificationError, match="applied ruling bytes differ"):
+        certify.verify_run(root)
+    with pytest.raises(
+            certify.CertificationError, match="applied ruling bytes differ"):
+        certify.resume_check(root, clear_stale_marker=True)
+
+
+def test_post_b8_ac_stamp_only_in_original_refuses_b6b_and_verification(
+        tmp_path):
+    root, a = _complete_stage_era_tail(tmp_path)
+    stamp = dm.argument_contract_stamp(
+        "passed_but_unread", "argpos:2", "source.py", "source.py", "2",
+        "source.py:1@call=0")
+    staging = a.audit / "_staging/code_error_register.md"
+    rewritten = staging.read_text(encoding="utf-8")
+    assert rewritten.count(stamp) == 2
+    staging.write_text(
+        rewritten.replace(stamp, "author-facing argument-contract finding", 1),
+        encoding="utf-8",
+    )
+    shutil.copy2(staging, a.audit / "code_error_register.md")
+
+    direct = rb.lint(a, "b6b-code")
+    assert direct.returncode == 1
+    assert "machine-written stamp" in direct.stdout
+    with pytest.raises(
+            certify.CertificationError, match="machine-written stamp"):
+        certify.verify_run(root)
+    with pytest.raises(
+            certify.CertificationError, match="machine-written stamp"):
+        certify.resume_check(root, clear_stale_marker=True)
+
+
+def test_published_rulings_digest_contract_tracks_frozen_worklist():
+    registers_reference = (
+        rb.SKILL_DIR / "references/registers.md").read_text(encoding="utf-8")
+    pipeline_reference = (
+        rb.SKILL_DIR / "references/pipeline-finalize.md").read_text(
+            encoding="utf-8")
+    assert "canonical JSON" in registers_reference
+    assert "`lines` and `b7_register_sha256`" in registers_reference
+    assert (
+        "`audit/_run/snapshots/severity_token_rulings/"
+        "b7_rejected_worklist.json`"
+    ) in pipeline_reference
+    assert "copy its `b7_certification_sha256`" in pipeline_reference
 
 
 def test_tier1_p28_test_oracle_notices_disabled_witness_binding(

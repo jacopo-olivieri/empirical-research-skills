@@ -752,15 +752,18 @@ def _completed_b3d_b6_run(tmp_path, verdict="not_error"):
         "plans/code_error_supplementary_recheck_plan.md",
         rb.recheck_plan_text("code", [], [])
         + "\nNo supplementary recheck inventory.\n")
+    # Certify b5 through the production state transition before b6a promotes
+    # its dispositions; the certifier owns the stage-era evidence binding.
+    certify.start_stage(root, "code_b5")
+    certify.set_shard(
+        root, "code_b5", "audit/_code_error_recheck/k1.md", "done")
+    certify.finish_stage(root, "code_b5", "done")
     assembled = rb.run_script("assemble_boundary.py", root, "--audit-dir", a.audit)
     assert assembled.returncode == 0, assembled.stdout + assembled.stderr
     os.replace(a.audit / "_staging/code_error_register.md",
                a.audit / "code_error_register.md")
     manifest = json.loads((a.audit / "_run/manifest.json").read_text())
     manifest["stages"]["code_b3d"]["status"] = "done"
-    manifest["stages"]["code_b5"]["status"] = "done"
-    manifest["stages"]["code_b5"]["shards"] = {
-        "audit/_code_error_recheck/k1.md": {"status": "done", "retries": 0}}
     manifest["stages"]["code_b6a"]["status"] = "done"
     certify.write_manifest_atomic(root, manifest)
     return root, a

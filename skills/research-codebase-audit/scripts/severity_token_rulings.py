@@ -15,12 +15,13 @@ import build_detector_mapping as detector_mapping
 import severity_tokens as tokens
 
 
-WORKLIST_SCHEMA = "severity-token-worklist/v1"
+WORKLIST_SCHEMA = "severity-token-worklist/v2"
 RULINGS_SCHEMA = "severity_token_rulings/v1"
 WORKLIST_PATH = "_run/snapshots/severity_token_rulings/b7_rejected_worklist.json"
 SNAPSHOT_REGISTER = "_run/snapshots/severity_token_rulings/code_error_register.md"
 SNAPSHOT_RULINGS = "_run/snapshots/severity_token_rulings/severity_token_rulings.json"
 RULINGS_PATH = "_run/severity_token_rulings.json"
+B8_SNAPSHOT_REGISTER = "_run/snapshots/b8/code_error_register.md"
 
 
 class RulingsError(RuntimeError):
@@ -210,14 +211,17 @@ def _cv_witness_binding_failure(package_root, audit, record):
     return None
 
 
-def validate_b7(package_root, audit, manifest):
+def validate_b7(package_root, audit, manifest, register_path=None):
     """Return ``(rejected rows, failures)`` for the b7 severity section."""
     audit = Path(audit)
     failures = []
     try:
-        register_path = audit / "_staging/code_error_register.md"
-        if not register_path.is_file():
-            register_path = audit / "code_error_register.md"
+        if register_path is None:
+            register_path = audit / "_staging/code_error_register.md"
+            if not register_path.is_file():
+                register_path = audit / "code_error_register.md"
+        else:
+            register_path = Path(register_path)
         _headers, register_rows, _text = _register(
             register_path)
         adjudications = parse_adjudications(audit / "register_cross_link_summary.md")
@@ -292,8 +296,11 @@ def validate_b7(package_root, audit, manifest):
     return rejected, failures
 
 
-def worklist_digest(lines):
-    payload = "\n".join(sorted(lines)).encode("utf-8")
+def worklist_digest(lines, register_sha256):
+    payload = json.dumps({
+        "lines": sorted(lines),
+        "b7_register_sha256": register_sha256,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -305,18 +312,21 @@ def snapshot_stage(package_root, audit, manifest):
     lines = sorted(row["Token Key"] for row in rejected)
     destination = audit / WORKLIST_PATH
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema": WORKLIST_SCHEMA,
-        "lines": lines,
-        "b7_certification_sha256": worklist_digest(lines),
-    }
-    tokens.write_atomic(destination, json.dumps(payload, indent=2) + "\n")
     source_register = audit / "code_error_register.md"
     if not source_register.is_file():
         # In the normal b7 transaction the promoted bytes may still be in
         # staging when the rulings stage starts.
         source_register = audit / "_staging/code_error_register.md"
-    shutil.copy2(source_register, audit / SNAPSHOT_REGISTER)
+    snapshot_register = audit / SNAPSHOT_REGISTER
+    shutil.copy2(source_register, snapshot_register)
+    register_sha256 = hashlib.sha256(snapshot_register.read_bytes()).hexdigest()
+    payload = {
+        "schema": WORKLIST_SCHEMA,
+        "lines": lines,
+        "b7_register_sha256": register_sha256,
+        "b7_certification_sha256": worklist_digest(lines, register_sha256),
+    }
+    tokens.write_atomic(destination, json.dumps(payload, indent=2) + "\n")
     return payload
 
 
@@ -326,14 +336,31 @@ def load_worklist(audit):
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RulingsError(f"{path}: cannot read frozen rejected worklist ({exc})") from exc
-    if set(payload) != {"schema", "lines", "b7_certification_sha256"}:
+    if set(payload) != {
+            "schema", "lines", "b7_register_sha256",
+            "b7_certification_sha256"}:
         raise RulingsError(f"{path}: frozen worklist has unexpected fields")
     lines = payload.get("lines")
+    register_sha256 = payload.get("b7_register_sha256")
     if payload.get("schema") != WORKLIST_SCHEMA or not isinstance(lines, list) \
             or not all(isinstance(line, str) for line in lines) \
-            or lines != sorted(set(lines)):
+            or lines != sorted(set(lines)) \
+            or not isinstance(register_sha256, str) \
+            or not re.fullmatch(r"[0-9a-f]{64}", register_sha256):
         raise RulingsError(f"{path}: malformed frozen worklist")
-    if payload["b7_certification_sha256"] != worklist_digest(lines):
+    snapshot = Path(audit) / SNAPSHOT_REGISTER
+    if snapshot.is_symlink() or not snapshot.is_file():
+        raise RulingsError(
+            f"{snapshot}: frozen pre-ruling register is missing or malformed")
+    try:
+        actual_register_sha256 = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RulingsError(
+            f"{snapshot}: cannot read frozen pre-ruling register ({exc})") from exc
+    if actual_register_sha256 != register_sha256:
+        raise RulingsError(f"{snapshot}: snapshot digest mismatch")
+    if payload["b7_certification_sha256"] != worklist_digest(
+            lines, register_sha256):
         raise RulingsError(f"{path}: frozen worklist digest mismatch")
     return payload
 
@@ -347,6 +374,30 @@ def _load_rulings(audit):
     if not isinstance(payload, dict):
         raise RulingsError(f"{path}: rulings artifact must be an object")
     return path, payload
+
+
+def _applied_register_path(audit, manifest):
+    """Locate the stage-era register the rulings were applied to.
+
+    During the rulings transaction, and while b8 has not yet promoted its
+    author-facing rewrite, the applied Status/Severity live in canonical
+    ``code_error_register.md``.  Once b8 is ``done`` it copies that rewrite
+    (``*Original`` columns, author-facing prose) over canonical, so canonical no
+    longer carries the stage-era applied register.  b8's own pre-rewrite
+    snapshot is canon-at-rulings-finish byte-for-byte (nothing mutates canonical
+    between rulings-finish and b8's snapshot), so honest replay binds there.
+    Return ``None`` to fail closed when b8 is ``done`` but that frozen boundary
+    is absent, a symlink, or otherwise not a regular file.
+    """
+    audit = Path(audit)
+    stages = (manifest or {}).get("stages")
+    b8 = stages.get("b8") if isinstance(stages, dict) else None
+    if isinstance(b8, dict) and b8.get("status") == "done":
+        snapshot = audit / B8_SNAPSHOT_REGISTER
+        if snapshot.is_symlink() or not snapshot.is_file():
+            return None
+        return snapshot
+    return audit / "code_error_register.md"
 
 
 def validate_rulings(package_root, audit, manifest, require_applied=False):
@@ -429,8 +480,14 @@ def validate_rulings(package_root, audit, manifest, require_applied=False):
             f"{path}: rulings do not exactly cover rejected worklist; "
             f"expected={sorted(wanted_errors)}, actual={sorted(decisions)}")
     if require_applied and not failures:
+        applied_register = _applied_register_path(audit, manifest)
+        if applied_register is None:
+            failures.append(
+                f"{audit / B8_SNAPSHOT_REGISTER}: b8 is done but its "
+                "pre-rewrite register snapshot is missing or malformed")
+            return decisions, failures
         try:
-            current_headers, current_rows, _text = _register(audit / "code_error_register.md")
+            current_headers, current_rows, _text = _register(applied_register)
             before_headers, _before_rows, _before_text = _register(audit / SNAPSHOT_REGISTER)
             if current_headers != before_headers:
                 failures.append("severity rulings cannot change register columns")
@@ -451,7 +508,7 @@ def validate_rulings(package_root, audit, manifest, require_applied=False):
             try:
                 shutil.copy2(audit / SNAPSHOT_REGISTER, expected_path)
                 _replace_register_rows(expected_path, decisions)
-                if ((audit / "code_error_register.md").read_bytes()
+                if (applied_register.read_bytes()
                         != expected_path.read_bytes()):
                     failures.append(
                         "applied ruling bytes differ outside the authorized Status/Severity cells")

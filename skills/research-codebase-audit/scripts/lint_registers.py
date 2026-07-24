@@ -565,13 +565,13 @@ def claim_named_identifiers(text):
     return found
 
 
-def check_anchoring_advisory(lint, audit, ledger_rows):
+def check_anchoring_advisory(lint, audit, ledger_rows, register_path=None):
     """Advisory-only scan of a b5-claims recheck ledger: flag every row whose
     `Proposed Register Change` closes the claim `confirmed` while the claim's
     text names an identifier absent from the row's `Evidence Checked`. One
     WARNING per flagged row; never a hard fail. Skips silently when the
     canonical claims register is absent or unparsable (advisory robustness)."""
-    reg_path = audit / "claims_register.md"
+    reg_path = register_path or audit / "claims_register.md"
     if not reg_path.is_file():
         return
     try:
@@ -1513,20 +1513,31 @@ def _final_token_partition(lint, audit, manifest, rows, stage="code_b6b"):
     return classifications
 
 
-def stage_b0(lint, audit, manifest):
+def _stage_register_path(audit, filename, stage_evidence_dir=None):
+    """Resolve a mutable canonical register to its certified stage-era copy."""
+    if stage_evidence_dir is not None:
+        return stage_evidence_dir / filename
+    return audit / filename
+
+
+def stage_b0(lint, audit, manifest, stage_evidence_dir=None):
     for f, cols in [
         ("claims_register.md", CLAIMS_COLS),
         ("output_register.md", OUTPUT_COLS),
         ("code_error_register.md", ERROR_COLS),
     ]:
-        text = read_text(lint, audit / f)
+        register_path = _stage_register_path(audit, f, stage_evidence_dir)
+        text = read_text(lint, register_path)
         if text is None:
             continue
-        rows = table_by_cols(lint, audit / f, text, cols, f)
+        rows = table_by_cols(lint, register_path, text, cols, f)
         if rows:
             real = [r for r in rows if not is_example_row(r)]
             if real:
-                lint.fail(f"{audit / f}: register must be empty at b0 (found {len(real)} rows)")
+                lint.fail(
+                    f"{register_path}: register must be empty at b0 "
+                    f"(found {len(real)} rows)"
+                )
     if read_text(lint, audit / "audit_readme.md") is None:
         pass
     cm = read_text(lint, audit / "CODEMAP.md")
@@ -2589,12 +2600,18 @@ def _names_source(text, source_id):
     ))
 
 
-def check_detector_mapping_b4(lint, audit, plan, inventory):
+def check_detector_mapping_b4(
+        lint, audit, plan, inventory, stage_evidence_dir=None):
     mappings = parse_detector_mappings(lint, audit)
     inv_by_id = {}
     for row in inventory:
         inv_by_id.setdefault(row.get("ID", ""), []).append(row)
-    register = load_register(lint, audit / "code_error_register.md", ERROR_COLS)
+    register = load_register(
+        lint,
+        _stage_register_path(
+            audit, "code_error_register.md", stage_evidence_dir),
+        ERROR_COLS,
+    )
     canonical = {}
     if register:
         canonical = {dict(zip(ERROR_COLS, row))["Error ID"]:
@@ -2661,7 +2678,8 @@ def _manifest_rules_by_key(lint, audit):
     return result
 
 
-def check_detector_mapping_b6(lint, audit, final_path=None):
+def check_detector_mapping_b6(
+        lint, audit, proposal_path=None, survival_path=None):
     plan = recheck_plan_path(audit, "code")
     mappings = parse_detector_mappings(lint, audit)
     if not mappings:
@@ -2687,13 +2705,25 @@ def check_detector_mapping_b6(lint, audit, final_path=None):
         if any(row["Channel"] == "MF" for row in mappings) else {}
     )
     frozen_post_b6a = audit / "_run/snapshots/code_b6b/code_error_register.md"
-    final_path = final_path or (
+    proposal_path = proposal_path or (
         frozen_post_b6a if frozen_post_b6a.is_file() else audit / "code_error_register.md")
-    final = load_register(lint, final_path, ERROR_COLS)
-    final_by_id = {}
-    if final:
-        final_by_id = {dict(zip(ERROR_COLS, row))["Error ID"]:
-                       dict(zip(ERROR_COLS, row)) for row in final[1]}
+    survival_path = survival_path or proposal_path
+    proposal = load_register(
+        lint, proposal_path, ERROR_COLS, allow_extra=True)
+    proposal_by_id = {}
+    if proposal:
+        proposal_by_id = {
+            dict(zip(proposal[0], row))["Error ID"]: dict(zip(proposal[0], row))
+            for row in proposal[1]
+        }
+    survival = load_register(
+        lint, survival_path, ERROR_COLS, allow_extra=True)
+    survival_by_id = {}
+    if survival:
+        survival_by_id = {
+            dict(zip(survival[0], row))["Error ID"]: dict(zip(survival[0], row))
+            for row in survival[1]
+        }
     snap = load_register(
         lint, audit / "_run/snapshots/code_b6a/code_error_register.md", ERROR_COLS)
     snapshot_by_id = {}
@@ -2727,7 +2757,7 @@ def check_detector_mapping_b6(lint, audit, final_path=None):
         if len(descendants) < 2:
             lint.fail(f"{summary}: split {original} must have at least two non-empty descendants")
         for descendant in descendants:
-            if descendant not in final_by_id:
+            if descendant not in proposal_by_id:
                 lint.fail(f"{summary}: split descendant {descendant} is absent from final register")
 
     boundary_path = audit / "_run/code_b6a/witness_outcomes.md"
@@ -2778,11 +2808,11 @@ def check_detector_mapping_b6(lint, audit, final_path=None):
     for eid, group in effective_groups.items():
         mapping_rows = [item[0] for item in group]
         path, ledger = group[0][1], group[0][2]
-        final_row = final_by_id.get(eid)
-        if final_row is None:
+        proposal_row = proposal_by_id.get(eid)
+        if proposal_row is None:
             lint.fail(f"{plan}: mapped Error ID {eid} absent from final staging register")
             continue
-        status = final_row.get("Status", "")
+        status = proposal_row.get("Status", "")
         verdict = ledger.get("Verdict", "")
         expected_disposition = expected_code_disposition(ledger)
         if expected_disposition is None:
@@ -2792,21 +2822,28 @@ def check_detector_mapping_b6(lint, audit, final_path=None):
         if status != wanted:
             lint.fail(f"{path}: mapped Error ID {eid} verdict '{verdict}' requires "
                       f"final status '{wanted}', found final status '{status}'")
-        if final_row.get("Severity", "") != wanted_severity:
+        if proposal_row.get("Severity", "") != wanted_severity:
             lint.fail(f"{path}: mapped Error ID {eid} final Severity "
-                      f"{final_row.get('Severity')!r} disagrees with applied proposal {wanted_severity!r}")
+                      f"{proposal_row.get('Severity')!r} disagrees with applied proposal {wanted_severity!r}")
         for column, replacement in parse_field_patches(lint, path, ledger).items():
-            if final_row.get(column) != replacement:
+            if proposal_row.get(column) != replacement:
                 lint.fail(f"{path}: mapped Error ID {eid} field patch for {column} was not applied")
 
         keys = {(row["Channel"], row["Source ID"], row["Witness ID"])
                 for row in mapping_rows}
-        final_text = " | ".join(final_row.values())
+        survival_row = survival_by_id.get(eid)
+        if survival_row is None:
+            lint.fail(
+                f"{survival_path}: mapped Error ID {eid} absent from latest "
+                "authorized register state"
+            )
+            continue
+        survival_description = survival_row.get("Error Description", "")
         for key in sorted(keys):
             stamp = ac_stamps.get(key)
-            if stamp is not None and stamp not in final_text:
+            if stamp is not None and stamp not in survival_description:
                 lint.fail(
-                    f"{final_path}: AC-mapped Error ID {eid} stripped the complete "
+                    f"{survival_path}: AC-mapped Error ID {eid} stripped the complete "
                     f"machine-written stamp for witness {key[2]}"
                 )
         allowed_records = set(list_cell(ledger.get("Verification Record IDs", "")))
@@ -2860,8 +2897,8 @@ def check_detector_mapping_b6(lint, audit, final_path=None):
             if target not in mapped:
                 lint.fail(f"{path}: guarded duplicate {eid} target {target!r} is not mechanically mapped")
                 continue
-            target_row = snapshot_by_id.get(target) or final_by_id.get(target)
-            source_row = snapshot_by_id.get(eid) or final_row
+            target_row = snapshot_by_id.get(target) or proposal_by_id.get(target)
+            source_row = snapshot_by_id.get(eid) or proposal_row
             if target_row is None or target_row.get("Error Type") != source_row.get("Error Type"):
                 lint.fail(f"{path}: duplicate {eid} and target {target} do not share Error Type")
             source_mechanisms = {post_by_key.get(key, {}).get("Mechanism") for key in keys}
@@ -2888,15 +2925,21 @@ def check_detector_mapping_b6(lint, audit, final_path=None):
             lint.fail(f"{summary}: split {original} is not justified by distinct active mechanisms")
 
 
-def canon_ids(lint, audit, stream):
+def canon_ids(lint, audit, stream, stage_evidence_dir=None):
     ids = set()
     if stream == "claims":
         for f, cols, idc in [("claims_register.md", CLAIMS_COLS, "Claim ID"), ("output_register.md", OUTPUT_COLS, "Output ID")]:
-            reg = load_register(lint, audit / f, cols)
+            reg = load_register(
+                lint, _stage_register_path(audit, f, stage_evidence_dir), cols)
             if reg:
                 ids |= set(col(reg[1], cols, idc))
     else:
-        reg = load_register(lint, audit / "code_error_register.md", ERROR_COLS)
+        reg = load_register(
+            lint,
+            _stage_register_path(
+                audit, "code_error_register.md", stage_evidence_dir),
+            ERROR_COLS,
+        )
         if reg:
             ids |= set(col(reg[1], ERROR_COLS, "Error ID"))
     return ids
@@ -2929,7 +2972,7 @@ def _sev_int(sev):
         return 0
 
 
-def required_recheck_ids(lint, audit, stream):
+def required_recheck_ids(lint, audit, stream, stage_evidence_dir=None):
     """Return (required_ids: set, substantive_ids: set) for the b4 inventory.
 
     `required` = rows the inventory MUST contain (a recall floor).
@@ -2937,7 +2980,12 @@ def required_recheck_ids(lint, audit, stream):
     `deep` depth (U7 definition, mirrored exactly)."""
     required, substantive = set(), set()
     if stream == "claims":
-        reg = load_register(lint, audit / "claims_register.md", CLAIMS_COLS)
+        reg = load_register(
+            lint,
+            _stage_register_path(
+                audit, "claims_register.md", stage_evidence_dir),
+            CLAIMS_COLS,
+        )
         if reg:
             for r in reg[1]:
                 d = dict(zip(CLAIMS_COLS, r))
@@ -2946,7 +2994,12 @@ def required_recheck_ids(lint, audit, stream):
                     required.add(cid)
                     substantive.add(cid)  # issue-flagged OR unclear == U7 substantive
     else:
-        reg = load_register(lint, audit / "code_error_register.md", ERROR_COLS)
+        reg = load_register(
+            lint,
+            _stage_register_path(
+                audit, "code_error_register.md", stage_evidence_dir),
+            ERROR_COLS,
+        )
         if reg:
             for r in reg[1]:
                 d = dict(zip(ERROR_COLS, r))
@@ -3016,7 +3069,8 @@ def check_conventions_artifact(lint, audit):
             )
 
 
-def stage_b4(lint, audit, stream, manifest=None):
+def stage_b4(
+        lint, audit, stream, manifest=None, stage_evidence_dir=None):
     if stream == "code":
         check_conventions_artifact(lint, audit)  # U2 (preserved — must run first, code only)
     parsed = parse_recheck_plan(lint, audit, stream)
@@ -3024,11 +3078,13 @@ def stage_b4(lint, audit, stream, manifest=None):
         return
     plan, inventory, clusters = parsed
     if stream == "code":
-        check_detector_mapping_b4(lint, audit, plan, inventory)
+        check_detector_mapping_b4(
+            lint, audit, plan, inventory, stage_evidence_dir)
         _token_dispatch_contract(lint, audit, manifest or {}, plan)
-    canon = canon_ids(lint, audit, stream)
+    canon = canon_ids(lint, audit, stream, stage_evidence_dir)
     # U8 (a): the required inventory computed from canon (a recall floor).
-    required, substantive = required_recheck_ids(lint, audit, stream)
+    required, substantive = required_recheck_ids(
+        lint, audit, stream, stage_evidence_dir)
     adjudicated = adjudicator_minted_ids(lint, audit) if stream == "claims" else set()
     required |= adjudicated
     substantive |= adjudicated
@@ -3073,7 +3129,9 @@ def stage_b4(lint, audit, stream, manifest=None):
     check_unique(lint, plan, [c["Shard File"] for c in clusters], "cluster Shard File")
 
 
-def stage_b5(lint, audit, stream, shard, manifest, supplementary=False):
+def stage_b5(
+        lint, audit, stream, shard, manifest, supplementary=False,
+        stage_evidence_dir=None):
     parsed = parse_recheck_plan(lint, audit, stream, supplementary)
     if parsed is None:
         return
@@ -3138,10 +3196,15 @@ def stage_b5(lint, audit, stream, shard, manifest, supplementary=False):
     check_unique(lint, shard, seen, "ledger ID")
     if stream == "claims":
         # U4 advisory: identifier anchoring on rows closing `confirmed`.
-        check_anchoring_advisory(lint, audit, rows)
+        check_anchoring_advisory(
+            lint, audit, rows,
+            register_path=_stage_register_path(
+                audit, "claims_register.md", stage_evidence_dir),
+        )
     else:
         _validate_code_adjudication_shard(
-            lint, audit, shard, text, rows, assigned, supplementary)
+            lint, audit, shard, text, rows, assigned, supplementary,
+            stage_evidence_dir=stage_evidence_dir)
         record_rows = tables_by_cols(
             lint, shard, text, severity_tokens.TOKEN_RECORD_COLS,
             "token_verification records")
@@ -3181,7 +3244,12 @@ def stage_b5(lint, audit, stream, shard, manifest, supplementary=False):
                 lint.fail(f"{shard}: {eid} invalid token_verification mechanism: {exc}")
             patches = parse_field_patches(lint, shard, ledger)
             carrier = patches.get("Why It Matters", "")
-            canonical = load_register(lint, audit / "code_error_register.md", ERROR_COLS)
+            canonical = load_register(
+                lint,
+                _stage_register_path(
+                    audit, "code_error_register.md", stage_evidence_dir),
+                ERROR_COLS,
+            )
             if canonical:
                 current = {dict(zip(ERROR_COLS, row))["Error ID"]:
                            dict(zip(ERROR_COLS, row)) for row in canonical[1]}
@@ -3238,8 +3306,9 @@ def _check_code_relation(lint, shard, key, relation):
     return False
 
 
-def _validate_code_adjudication_shard(lint, audit, shard, text, rows, assigned,
-                                       supplementary=False):
+def _validate_code_adjudication_shard(
+        lint, audit, shard, text, rows, assigned, supplementary=False,
+        stage_evidence_dir=None):
     parsed_tables = parse_tables(text)
     ledger_table_count = sum(
         1 for headers, _table_rows, _line in parsed_tables
@@ -4103,7 +4172,8 @@ def stage_b6b(lint, audit, stream, manifest):
     if stream == "code":
         if final_code_register_path is not None:
             check_detector_mapping_b6(
-                lint, audit, final_path=final_code_register_path)
+                lint, audit, proposal_path=final_code_register_path,
+                survival_path=audit / "code_error_register.md")
         error_rows = [row for row in final_by_all.values()
                       if str(row.get("Error ID", "")).startswith("E-")]
         if _u8_tokens_active(manifest, audit, "code_b6b", rows=error_rows):
@@ -4447,7 +4517,9 @@ def stage_bC(lint, audit, manifest):
                 outputs[1], outputs[0], "Output ID", "Claim IDs", "bC C<->O")
 
 
-def non_link_identical(lint, st_rows, st_cols, sn_rows, base_cols, idc, link_col, rewrite_pairs, label):
+def non_link_identical(
+        lint, st_rows, st_cols, sn_rows, base_cols, idc, link_col,
+        rewrite_pairs, label, authorized_changes=()):
     """Every non-link column must still match the b7 snapshot. Replay-aware: after b8 has run,
     staging carries the `*Original` columns and its base rewrite-pair columns are rewritten in
     place — so when a rewrite-pair's `*Original` column is present, compare the snapshot's base
@@ -4462,7 +4534,7 @@ def non_link_identical(lint, st_rows, st_cols, sn_rows, base_cols, idc, link_col
     rewrite_base = {base: orig for base, orig in rewrite_pairs}
     for i, row in st.items():
         for c in base_cols:
-            if c == link_col:
+            if c == link_col or c in authorized_changes:
                 continue
             orig_col = rewrite_base.get(c)
             if orig_col and orig_col in st_cols:
@@ -4628,6 +4700,37 @@ def check_pairs_listed(lint, summary, section, pairs, stage, reason):
             )
 
 
+def _severity_token_rulings_done(manifest):
+    stages = (manifest or {}).get("stages", {})
+    if not isinstance(stages, dict):
+        return False
+    entry = stages.get("severity_token_rulings")
+    return isinstance(entry, dict) and entry.get("status") == "done"
+
+
+def b7_classification_errors(
+        lint, audit, manifest, current_headers, current_rows):
+    """Use the immutable pre-ruling register for b7-era classifications."""
+    if not _severity_token_rulings_done(manifest):
+        return current_headers, current_rows
+    snapshot = audit / severity_token_rulings.SNAPSHOT_REGISTER
+    if not snapshot.is_file():
+        # Snapshot integrity is enforced by the rulings transition and its
+        # verify/resume obligation. Keep b7/b8's classification helper scoped
+        # to honest replay rather than adding a second ownership site.
+        return current_headers, current_rows
+    frozen = load_register(
+        lint,
+        snapshot,
+        ERROR_COLS,
+    )
+    if frozen is None:
+        return current_headers, current_rows
+    return frozen[0], [
+        row for row in frozen[1] if not is_example_row(row)
+    ]
+
+
 def stage_b7(lint, audit, manifest=None):
     snap = audit / "_run" / "snapshots" / "b7"
     staging = audit / "_staging"
@@ -4642,6 +4745,7 @@ def stage_b7(lint, audit, manifest=None):
     # the allow_extra path does not drop schema example rows — filter them here so ID sets match
     c_headers, c_rows = list(c[0]), [r for r in c[1] if not is_example_row(r)]
     e_headers, e_rows = list(e[0]), [r for r in e[1] if not is_example_row(r)]
+    rulings_done = _severity_token_rulings_done(manifest)
     non_link_identical(
         lint, c_rows, c_headers, cs[1], CLAIMS_COLS, "Claim ID", "Related Error IDs",
         REWRITE_PAIRS["claims_register.md"], "b7 claims",
@@ -4649,7 +4753,10 @@ def stage_b7(lint, audit, manifest=None):
     non_link_identical(
         lint, e_rows, e_headers, es[1], ERROR_COLS, "Error ID", "Related Claim IDs",
         REWRITE_PAIRS["code_error_register.md"], "b7 errors",
+        authorized_changes=({"Status", "Severity"} if rulings_done else ()),
     )
+    classification_e_headers, classification_e_rows = b7_classification_errors(
+        lint, audit, manifest, e_headers, e_rows)
     check_bidirectional(
         lint, c_rows, c_headers, "Claim ID", "Related Error IDs",
         e_rows, e_headers, "Error ID", "Related Claim IDs", "b7 C<->E",
@@ -4657,25 +4764,35 @@ def stage_b7(lint, audit, manifest=None):
     summary = read_text(lint, audit / "register_cross_link_summary.md")
     check_pairs_listed(
         lint, summary, "Status conflicts",
-        confirmed_conflict_links(c_rows, e_rows, c_headers, e_headers),
+        confirmed_conflict_links(
+            c_rows, classification_e_rows,
+            c_headers, classification_e_headers),
         "b7", "confirmed claim linked to confirmed error",
     )
     check_pairs_listed(
         lint, summary, "Escalated mapped claims",
-        escalated_mapped_links(c_rows, e_rows, c_headers, e_headers),
+        escalated_mapped_links(
+            c_rows, classification_e_rows,
+            c_headers, classification_e_headers),
         "b7", "mapped claim linked to confirmed error",
     )
     check_pairs_listed(
         lint, summary, "Severity divergences",
-        severity_divergence_links(c_rows, e_rows, c_headers, e_headers),
+        severity_divergence_links(
+            c_rows, classification_e_rows,
+            c_headers, classification_e_headers),
         "b7", "linked pair with differing severities",
     )
     # SC-01 overlap-conflict advisory (U5): warn on confirmed-vs-confirmed pairs
     # whose cited code lines overlap but that no one linked — the case the hard
     # checks above cannot see (they only inspect links a worker already created).
     # Advisory only; the exit code is driven by lint.errors alone.
-    linked = set(confirmed_conflict_links(c_rows, e_rows, c_headers, e_headers))
-    for cid, eid in overlapping_confirmed_pairs(c_rows, e_rows, c_headers, e_headers):
+    linked = set(confirmed_conflict_links(
+        c_rows, classification_e_rows,
+        c_headers, classification_e_headers))
+    for cid, eid in overlapping_confirmed_pairs(
+            c_rows, classification_e_rows,
+            c_headers, classification_e_headers):
         if (cid, eid) in linked:
             continue
         lint.warn(
@@ -4689,8 +4806,14 @@ def stage_b7(lint, audit, manifest=None):
     if (_u8_tokens_active(manifest or {}, audit, FINAL_TOKEN_RECEIPT_HOMES,
                           rows=b7_error_rows)
             or "## Severity-token adjudications" in (summary or "")):
+        b7_register = None
+        if rulings_done:
+            b7_register = (
+                audit / "_run/snapshots/severity_token_rulings/"
+                "code_error_register.md"
+            )
         _rejected, severity_failures = severity_token_rulings.validate_b7(
-            audit.parent, audit, manifest or {})
+            audit.parent, audit, manifest or {}, register_path=b7_register)
         for failure in severity_failures:
             lint.fail(f"b7 severity-token sweep: {failure}")
 
@@ -4716,15 +4839,12 @@ def stage_b8(lint, audit, manifest):
     snap = audit / "_run" / "snapshots" / "b8"
     staging = audit / "_staging"
     mode = (manifest or {}).get("mode", "replication")
-    stages = (manifest or {}).get("stages", {})
-    rulings_entry = stages.get("severity_token_rulings") if isinstance(stages, dict) else None
     staging_error_rows = list(severity_tokens._load_register_error_rows(
         audit, prefer_staging=True).values())
     if (mode == "replication"
             and _u8_tokens_active(manifest, audit, FINAL_TOKEN_RECEIPT_HOMES,
                                   rows=staging_error_rows)
-            and (not isinstance(rulings_entry, dict)
-                 or rulings_entry.get("status") != "done")):
+            and not _severity_token_rulings_done(manifest)):
         lint.fail("b8 refuses while severity_token_rulings is not done")
     files = ["code_error_register.md"] if mode == "code_errors_only" else ["claims_register.md", "code_error_register.md"]
     if mode != "code_errors_only":
@@ -4792,18 +4912,26 @@ def stage_b8(lint, audit, manifest):
                     f"confirmed error {eid} at b8 (unresolved status conflict)"
                 )
             summary = read_text(lint, audit / "register_cross_link_summary.md")
+            classification_e_headers, classification_e_rows = (
+                b7_classification_errors(
+                    lint, audit, manifest, st_e[0], st_e[1])
+            )
             # A mapped-claim↔confirmed-error pair may legitimately survive to b8 (unlike a status
             # conflict), but a surviving one must remain documented — b8 checks only that it stays
             # listed, not any status outcome. Verifying the second look actually ran (a recheck
             # ledger entry) is a prose obligation on the conductor (pipeline-finalize b7 step 5).
             check_pairs_listed(
                 lint, summary, "Escalated mapped claims",
-                escalated_mapped_links(st_c[1], st_e[1], st_c[0], st_e[0]),
+                escalated_mapped_links(
+                    st_c[1], classification_e_rows,
+                    st_c[0], classification_e_headers),
                 "b8", "mapped claim linked to confirmed error",
             )
             check_pairs_listed(
                 lint, summary, "Severity divergences",
-                severity_divergence_links(st_c[1], st_e[1], st_c[0], st_e[0]),
+                severity_divergence_links(
+                    st_c[1], classification_e_rows,
+                    st_c[0], classification_e_headers),
                 "b8", "linked pair with differing severities",
             )
 
@@ -5040,6 +5168,7 @@ def main() -> int:
     ap.add_argument("--stage", required=True, choices=STAGES)
     ap.add_argument("--shard", type=Path, default=None)
     ap.add_argument("--audit-dir", type=Path, default=Path("audit"))
+    ap.add_argument("--stage-evidence-dir", type=Path)
     args = ap.parse_args()
 
     lint = Lint()
@@ -5053,9 +5182,10 @@ def main() -> int:
             lint.fail(f"{mpath}: invalid JSON")
 
     stage = args.stage
+    stage_evidence_dir = args.stage_evidence_dir
     n, _, stream = stage.partition("-")
     if stage == "b0":
-        stage_b0(lint, audit, manifest)
+        stage_b0(lint, audit, manifest, stage_evidence_dir)
     elif n == "b1":
         stage_b1(lint, audit, stream, manifest)
     elif n == "b2":
@@ -5068,13 +5198,17 @@ def main() -> int:
         else:
             stage_b3b(lint, audit, stream, manifest)
     elif n == "b4":
-        stage_b4(lint, audit, stream, manifest)
+        stage_b4(lint, audit, stream, manifest, stage_evidence_dir)
     elif n == "b5":
-        stage_b5(lint, audit, stream, args.shard, manifest)
+        stage_b5(
+            lint, audit, stream, args.shard, manifest,
+            stage_evidence_dir=stage_evidence_dir)
     elif n == "b6a":
         stage_b6a(lint, audit, stream, manifest)
     elif n == "b5s":
-        stage_b5(lint, audit, stream, args.shard, manifest, supplementary=True)
+        stage_b5(
+            lint, audit, stream, args.shard, manifest, supplementary=True,
+            stage_evidence_dir=stage_evidence_dir)
     elif n == "b6b":
         stage_b6b(lint, audit, stream, manifest)
     elif stage == "bC":
