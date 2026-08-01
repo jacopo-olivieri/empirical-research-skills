@@ -714,6 +714,11 @@ def _residual_tail(tmp_path, *, target_in_dispatch=False, status="confirmation_n
     a.write_register("_run/snapshots/b8/claims_register.md", rb.CLAIMS_COLS, [])
     a.write_register("_run/snapshots/b8/code_error_register.md",
                      rb.ERROR_COLS, [row])
+    # The manifest marks severity_token_rulings done, so the fail-closed
+    # b7_classification view requires its frozen pre-ruling register.
+    a.write_register(
+        "_run/snapshots/severity_token_rulings/code_error_register.md",
+        rb.ERROR_COLS, [row])
     claims_cols, claims_rows = rb.rewrite_pass_cols(
         rb.CLAIMS_COLS, [], ["Issue Description"])
     error_cols, error_rows = rb.rewrite_pass_cols(

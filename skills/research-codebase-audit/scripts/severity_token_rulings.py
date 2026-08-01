@@ -11,17 +11,19 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import authorized_deltas
 import build_detector_mapping as detector_mapping
+import evidence_views
 import severity_tokens as tokens
 
 
-WORKLIST_SCHEMA = "severity-token-worklist/v2"
+WORKLIST_SCHEMA = evidence_views.WORKLIST_SCHEMA
 RULINGS_SCHEMA = "severity_token_rulings/v1"
-WORKLIST_PATH = "_run/snapshots/severity_token_rulings/b7_rejected_worklist.json"
-SNAPSHOT_REGISTER = "_run/snapshots/severity_token_rulings/code_error_register.md"
-SNAPSHOT_RULINGS = "_run/snapshots/severity_token_rulings/severity_token_rulings.json"
+WORKLIST_PATH = evidence_views.WORKLIST_PATH
+SNAPSHOT_REGISTER = evidence_views.PRE_RULING_REGISTER
+SNAPSHOT_RULINGS = authorized_deltas.FROZEN_RULINGS
 RULINGS_PATH = "_run/severity_token_rulings.json"
-B8_SNAPSHOT_REGISTER = "_run/snapshots/b8/code_error_register.md"
+B8_SNAPSHOT_REGISTER = evidence_views.B8_SNAPSHOT_DIR + "/code_error_register.md"
 
 
 class RulingsError(RuntimeError):
@@ -36,8 +38,7 @@ def _section(text, heading):
     return match.group(1) if match else None
 
 
-def _register(path):
-    text = Path(path).read_text(encoding="utf-8")
+def _register_text(path, text):
     for headers, rows, _line in tokens.parse_tables(text):
         if not {"Error ID", "Status", "Severity", "Why It Matters"}.issubset(headers):
             continue
@@ -47,6 +48,11 @@ def _register(path):
                 parsed.append(dict(zip(headers, map(tokens.clean, row))))
         return headers, parsed, text
     raise RulingsError(f"{path}: code-error register table not found")
+
+
+def _register(path):
+    text = Path(path).read_text(encoding="utf-8")
+    return _register_text(path, text)
 
 
 def parse_adjudications(path):
@@ -211,22 +217,45 @@ def _cv_witness_binding_failure(package_root, audit, record):
     return None
 
 
-def validate_b7(package_root, audit, manifest, register_path=None):
+def validate_b7(package_root, audit, manifest):
     """Return ``(rejected rows, failures)`` for the b7 severity section."""
     audit = Path(audit)
     failures = []
+    resolved = evidence_views.resolve(
+        "b7_classification", "code_error_register.md", audit, manifest or {})
+    if isinstance(resolved, evidence_views.ViewRefusal):
+        return [], [str(resolved)]
     try:
-        if register_path is None:
-            register_path = audit / "_staging/code_error_register.md"
-            if not register_path.is_file():
-                register_path = audit / "code_error_register.md"
-        else:
-            register_path = Path(register_path)
-        _headers, register_rows, _text = _register(
-            register_path)
+        _headers, register_rows, _text = _register_text(
+            resolved.source_path, resolved.text)
         adjudications = parse_adjudications(audit / "register_cross_link_summary.md")
     except (OSError, RulingsError) as exc:
         return [], [str(exc)]
+    if evidence_views.stage_done(manifest, "bC"):
+        # Post-bC replay-plus-extension: the summary is post-bC-era, so the
+        # eligible token set composes the frozen b7_classification with the
+        # authorized rulings caps and extends it with exactly the
+        # correction plan's new rows — never with mutable current state.
+        rulings_delta, delta_failures = authorized_deltas.permitted_delta(
+            "pre_ruling", "rulings_applied", "code_error_register.md",
+            audit, manifest)
+        failures.extend(delta_failures)
+        bc_delta, bc_failures = authorized_deltas.permitted_delta(
+            "bC_correction", "export_bound", "code_error_register.md",
+            audit, manifest)
+        failures.extend(bc_failures)
+        composed = []
+        for row in register_rows:
+            updated = dict(row)
+            for column in ("Status", "Severity"):
+                key = (row["Error ID"], column)
+                if key in rulings_delta.exact_cells:
+                    updated[column] = rulings_delta.exact_cells[key]
+            composed.append(updated)
+        composed.extend(
+            {key: str(value) for key, value in bc_delta.added_rows[row_id].items()}
+            for row_id in sorted(bc_delta.added_rows))
+        register_rows = composed
     eligible = {}
     mode = (manifest or {}).get("mode", "replication")
     for row in register_rows:
@@ -279,29 +308,28 @@ def validate_b7(package_root, audit, manifest, register_path=None):
             )
         if adjudication["Verdict"] == "rejected":
             rejected.append(adjudication)
-    # On the post-bC b7 rerun, the original frozen rejected set may shrink
-    # after cap/hold, but no newly rejected key is legal.
-    worklist_path = audit / WORKLIST_PATH
-    if worklist_path.is_file():
-        try:
-            frozen = json.loads(worklist_path.read_text(encoding="utf-8"))
-            frozen_keys = set(frozen.get("lines", []))
-            new_keys = {row["Token Key"] for row in rejected} - frozen_keys
-            if new_keys:
-                failures.append(
-                    "post-bC b7 rerun introduced new rejected severity-token key(s): "
-                    + ", ".join(sorted(new_keys)))
-        except (OSError, json.JSONDecodeError) as exc:
-            failures.append(f"{worklist_path}: invalid frozen rejected worklist ({exc})")
+    # On a post-b7 rerun, the original frozen rejected set may shrink after
+    # cap/hold, but no newly rejected key is legal.
+    frozen_worklist = evidence_views.resolve(
+        "pre_ruling", "code_error_register.md", audit, manifest or {})
+    if isinstance(frozen_worklist, evidence_views.ViewRefusal):
+        failures.append(str(frozen_worklist))
+    elif isinstance(frozen_worklist, evidence_views.ResolvedView):
+        frozen_keys = set(frozen_worklist.payload.get("lines", []))
+        new_keys = {
+            row["Token Key"] for row in adjudications
+            if row.get("Verdict") == "rejected"
+        } - frozen_keys
+        if new_keys:
+            failures.append(
+                "post-bC b7 rerun introduced new rejected severity-token key(s): "
+                + ", ".join(sorted(new_keys)))
+    # A PrematureAsk means the rulings boundary has not been reached yet —
+    # the initial b7 certification, where no frozen worklist binds.
     return rejected, failures
 
 
-def worklist_digest(lines, register_sha256):
-    payload = json.dumps({
-        "lines": sorted(lines),
-        "b7_register_sha256": register_sha256,
-    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+worklist_digest = evidence_views.worklist_digest
 
 
 def snapshot_stage(package_root, audit, manifest):
@@ -330,39 +358,19 @@ def snapshot_stage(package_root, audit, manifest):
     return payload
 
 
-def load_worklist(audit):
-    path = Path(audit) / WORKLIST_PATH
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RulingsError(f"{path}: cannot read frozen rejected worklist ({exc})") from exc
-    if set(payload) != {
-            "schema", "lines", "b7_register_sha256",
-            "b7_certification_sha256"}:
-        raise RulingsError(f"{path}: frozen worklist has unexpected fields")
-    lines = payload.get("lines")
-    register_sha256 = payload.get("b7_register_sha256")
-    if payload.get("schema") != WORKLIST_SCHEMA or not isinstance(lines, list) \
-            or not all(isinstance(line, str) for line in lines) \
-            or lines != sorted(set(lines)) \
-            or not isinstance(register_sha256, str) \
-            or not re.fullmatch(r"[0-9a-f]{64}", register_sha256):
-        raise RulingsError(f"{path}: malformed frozen worklist")
-    snapshot = Path(audit) / SNAPSHOT_REGISTER
-    if snapshot.is_symlink() or not snapshot.is_file():
+def load_worklist(audit, manifest=None):
+    """Resolve the ``pre_ruling`` view: the frozen rejected worklist plus the
+    exact pre-ruling register bytes, digest-verified.  Returns the resolved
+    view (``payload`` carries the worklist)."""
+    resolved = evidence_views.resolve(
+        "pre_ruling", "code_error_register.md", audit, manifest or {})
+    if isinstance(resolved, evidence_views.PrematureAsk):
         raise RulingsError(
-            f"{snapshot}: frozen pre-ruling register is missing or malformed")
-    try:
-        actual_register_sha256 = hashlib.sha256(snapshot.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise RulingsError(
-            f"{snapshot}: cannot read frozen pre-ruling register ({exc})") from exc
-    if actual_register_sha256 != register_sha256:
-        raise RulingsError(f"{snapshot}: snapshot digest mismatch")
-    if payload["b7_certification_sha256"] != worklist_digest(
-            lines, register_sha256):
-        raise RulingsError(f"{path}: frozen worklist digest mismatch")
-    return payload
+            f"{Path(audit) / WORKLIST_PATH}: cannot read frozen rejected "
+            "worklist (the rulings boundary has not been reached)")
+    if isinstance(resolved, evidence_views.ViewRefusal):
+        raise RulingsError(str(resolved))
+    return resolved
 
 
 def _load_rulings(audit):
@@ -376,37 +384,15 @@ def _load_rulings(audit):
     return path, payload
 
 
-def _applied_register_path(audit, manifest):
-    """Locate the stage-era register the rulings were applied to.
-
-    During the rulings transaction, and while b8 has not yet promoted its
-    author-facing rewrite, the applied Status/Severity live in canonical
-    ``code_error_register.md``.  Once b8 is ``done`` it copies that rewrite
-    (``*Original`` columns, author-facing prose) over canonical, so canonical no
-    longer carries the stage-era applied register.  b8's own pre-rewrite
-    snapshot is canon-at-rulings-finish byte-for-byte (nothing mutates canonical
-    between rulings-finish and b8's snapshot), so honest replay binds there.
-    Return ``None`` to fail closed when b8 is ``done`` but that frozen boundary
-    is absent, a symlink, or otherwise not a regular file.
-    """
-    audit = Path(audit)
-    stages = (manifest or {}).get("stages")
-    b8 = stages.get("b8") if isinstance(stages, dict) else None
-    if isinstance(b8, dict) and b8.get("status") == "done":
-        snapshot = audit / B8_SNAPSHOT_REGISTER
-        if snapshot.is_symlink() or not snapshot.is_file():
-            return None
-        return snapshot
-    return audit / "code_error_register.md"
-
-
 def validate_rulings(package_root, audit, manifest, require_applied=False):
     audit = Path(audit)
     failures = []
     try:
-        worklist = load_worklist(audit)
+        pre_ruling = load_worklist(audit, manifest)
+        worklist = pre_ruling.payload
         path, payload = _load_rulings(audit)
-        _headers, before_rows, _text = _register(audit / SNAPSHOT_REGISTER)
+        _headers, before_rows, _text = _register_text(
+            pre_ruling.source_path, pre_ruling.text)
     except (OSError, RulingsError) as exc:
         return {}, [str(exc)]
     lines = worklist["lines"]
@@ -480,15 +466,23 @@ def validate_rulings(package_root, audit, manifest, require_applied=False):
             f"{path}: rulings do not exactly cover rejected worklist; "
             f"expected={sorted(wanted_errors)}, actual={sorted(decisions)}")
     if require_applied and not failures:
-        applied_register = _applied_register_path(audit, manifest)
-        if applied_register is None:
-            failures.append(
-                f"{audit / B8_SNAPSHOT_REGISTER}: b8 is done but its "
-                "pre-rewrite register snapshot is missing or malformed")
+        applied_view = evidence_views.resolve(
+            "rulings_applied", "code_error_register.md", audit, manifest or {})
+        if isinstance(applied_view, evidence_views.ViewRefusal):
+            if (applied_view.source_path is not None
+                    and "snapshots/b8" in applied_view.source_path.as_posix()):
+                failures.append(
+                    f"{audit / B8_SNAPSHOT_REGISTER}: b8 is done but its "
+                    "pre-rewrite register snapshot is missing or malformed")
+            else:
+                failures.append(str(applied_view))
             return decisions, failures
+        applied_register = applied_view.source_path
         try:
-            current_headers, current_rows, _text = _register(applied_register)
-            before_headers, _before_rows, _before_text = _register(audit / SNAPSHOT_REGISTER)
+            current_headers, current_rows, _text = _register_text(
+                applied_register, applied_view.text)
+            before_headers, _before_rows, _before_text = _register_text(
+                pre_ruling.source_path, pre_ruling.text)
             if current_headers != before_headers:
                 failures.append("severity rulings cannot change register columns")
             current = {row["Error ID"]: row for row in current_rows}
@@ -506,10 +500,9 @@ def validate_rulings(package_root, audit, manifest, require_applied=False):
             os.close(fd)
             expected_path = Path(temporary)
             try:
-                shutil.copy2(audit / SNAPSHOT_REGISTER, expected_path)
+                expected_path.write_bytes(pre_ruling.raw)
                 _replace_register_rows(expected_path, decisions)
-                if (applied_register.read_bytes()
-                        != expected_path.read_bytes()):
+                if applied_view.raw != expected_path.read_bytes():
                     failures.append(
                         "applied ruling bytes differ outside the authorized Status/Severity cells")
             finally:
@@ -592,14 +585,15 @@ def apply_rulings(package_root, audit, manifest):
     frozen = audit / SNAPSHOT_RULINGS
     frozen.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, frozen)
-    # Render from the frozen pre-stage register, so a failed prior attempt
-    # cannot accumulate mutations.  Replace canonical only after validation.
-    snapshot = audit / SNAPSHOT_REGISTER
+    # Render from the frozen pre-stage register (the resolved, digest-bound
+    # pre_ruling bytes), so a failed prior attempt cannot accumulate
+    # mutations.  Replace canonical only after validation.
+    pre_ruling = load_worklist(audit, manifest)
     fd, temporary = tempfile.mkstemp(prefix=".severity-rulings.", dir=audit)
     os.close(fd)
     temp_path = Path(temporary)
     try:
-        shutil.copy2(snapshot, temp_path)
+        temp_path.write_bytes(pre_ruling.raw)
         _replace_register_rows(temp_path, decisions)
         os.replace(temp_path, audit / "code_error_register.md")
     except BaseException:

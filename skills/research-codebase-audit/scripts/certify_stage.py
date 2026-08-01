@@ -21,6 +21,7 @@ from mechanism_schema import MECHANISM_SCHEMA_VERSION
 from source_projection import iter_in_scope_entries
 import build_detector_mapping as detector_mapping
 import dispatch_tracking
+import evidence_views
 import lint_registers as registers
 import paper_sources
 import severity_token_rulings
@@ -959,7 +960,7 @@ def _refuse_pending_severity_token_rulings(package_root, manifest):
     severe_rows = severity_tokens._load_register_error_rows(audit)
     activated = (
         (audit / "_run/code_b6b/token_receipts.md").is_file()
-        or (audit / "_run/snapshots/severity_token_rulings/b7_rejected_worklist.json").is_file()
+        or (audit / evidence_views.WORKLIST_PATH).is_file()
         or severity_tokens.gate_required(severe_rows.values())
     )
     if not activated:

@@ -23,8 +23,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import authorized_deltas
 import definition_use as du
 import build_detector_mapping as detector_mapping
+import evidence_views
 import mechanism_schema as mechanism
 import severity_tokens
 import severity_token_rulings
@@ -195,11 +197,8 @@ LO_COLS = ["LO ID", "Source Shard", "Anchor", "Observation"]
 LO_DISPOSITION_COLS = ["LO ID", "Prior State", "State"]
 LO_EMPTY = "No late observations."
 LO_DISPOSITIONS_EMPTY = "No dispositions."
-BC_PLAN_COLS = [
-    "BC ID", "LO ID", "Register", "Operation", "Row ID", "Payload JSON",
-    "Old Value SHA256",
-]
-BC_RANGE_RE = re.compile(r"^Declared bC range:\s*([CEO]-\d{4})[–—-]([CEO]-\d{4})\s*$", re.M)
+BC_PLAN_COLS = authorized_deltas.BC_PLAN_COLS
+BC_RANGE_RE = authorized_deltas.BC_RANGE_RE
 def has_conflict_markers(text):
     starts = re.search(r"^<{7}(\s|$)", text, re.M)
     ends = re.search(r"^>{7}(\s|$)", text, re.M)
@@ -1988,6 +1987,34 @@ def load_register(lint, path, cols, allow_extra=False):
     if rows is None:
         return None
     return cols, [r for r in rows if not is_example_row(r)]
+
+
+def load_view_register(lint, view, register, audit, manifest, cols,
+                       allow_extra=False):
+    """Resolve one named evidence view and parse it like ``load_register``.
+
+    Returns ``(resolved, (headers, rows))``; a refusal or premature ask
+    fails the lint and returns ``(result, None)``.  The live register never
+    substitutes for a missing view.
+    """
+    resolved = evidence_views.resolve(view, register, audit, manifest)
+    if isinstance(resolved, (evidence_views.ViewRefusal,
+                             evidence_views.PrematureAsk)):
+        lint.fail(str(resolved))
+        return resolved, None
+    text, path = resolved.text, resolved.source_path
+    if has_conflict_markers(text):
+        lint.fail(f"conflict marker in {path}")
+    if allow_extra:
+        for headers, rows, _ in parse_tables(text):
+            if set(cols) <= set(headers):
+                return resolved, (headers, rows)
+        lint.fail(f"{path}: no table containing required columns")
+        return resolved, None
+    rows = table_by_cols(lint, path, text, cols, path.name)
+    if rows is None:
+        return resolved, None
+    return resolved, (cols, [r for r in rows if not is_example_row(r)])
 
 
 def code_review_inventory(lint, plan, allocations):
@@ -3960,9 +3987,10 @@ def _claim_disposition_allowed(row, final):
     return False
 
 
-def _late_observation_rows(lint, audit, stream, path=None):
+def _late_observation_rows(lint, audit, stream, path=None, text=None):
     path = path or audit / f"late_observations_{stream}.md"
-    text = read_text(lint, path)
+    if text is None:
+        text = read_text(lint, path)
     if text is None:
         return path, [], []
     tables = [(headers, rows) for headers, rows, _line in parse_tables(text)]
@@ -4127,54 +4155,62 @@ def stage_b6b(lint, audit, stream, manifest):
     check_manifest_worker_shards(
         lint, manifest, f"{stream}_b5s", plan, "Cluster ID", clusters)
     snap = audit / "_run/snapshots" / SNAP_KEY[f"b6b-{stream}"]
-    final_by_all = {}
-    final_register_paths = []
-    final_code_register_path = None
+    proposal_by_all = {}
+    proposal_register_paths = []
+    proposal_code_register_path = None
     for fname, cols, id_col in register_files(audit, stream):
-        # b7/b8 (and later bC) may legally evolve canon after b6b.  Prefer the
-        # first immutable pre-stage image that preserves the post-b6b ID set.
-        later_snapshots = ("bC", "b7", "b8")
-        final_path = next((
-            audit / "_run/snapshots" / stage / fname
-            for stage in later_snapshots
-            if (audit / "_run/snapshots" / stage / fname).is_file()
-        ), audit / fname)
-        final = load_register(lint, final_path, cols, allow_extra=True)
+        # The post-b6b state is the b6b_proposal evidence view; the resolver
+        # owns the phase conditional and the fail-closed rule.
+        view, parsed = load_view_register(
+            lint, "b6b_proposal", fname, audit, manifest, cols,
+            allow_extra=True)
         before = load_register(lint, snap / fname, cols)
-        if final is None or before is None:
+        if parsed is None or before is None:
             continue
-        final_register_paths.append(final_path)
-        final_rows = [
-            [dict(zip(final[0], row)).get(column, "") for column in cols]
-            for row in final[1]
+        proposal_path = view.source_path
+        proposal_register_paths.append(proposal_path)
+        proposal_rows = [
+            [dict(zip(parsed[0], row)).get(column, "") for column in cols]
+            for row in parsed[1]
         ]
-        final_ids = set(col(final_rows, cols, id_col))
+        proposal_ids = set(col(proposal_rows, cols, id_col))
         before_ids = set(col(before[1], cols, id_col))
-        if final_ids != before_ids:
-            lint.fail(f"{final_path}: b6b cannot mint or delete register rows")
-        final_by_all.update({dict(zip(cols, row))[id_col]: dict(zip(cols, row))
-                             for row in final_rows})
+        bc_delta, bc_failures = authorized_deltas.permitted_delta(
+            "bC_correction", "export_bound", fname, audit, manifest)
+        for failure in bc_failures:
+            lint.fail(failure)
+        if (proposal_ids - before_ids - set(bc_delta.added_rows)
+                or before_ids - proposal_ids):
+            lint.fail(f"{proposal_path}: b6b cannot mint or delete register rows")
+        proposal_by_all.update({dict(zip(cols, row))[id_col]: dict(zip(cols, row))
+                                for row in proposal_rows})
         if fname == "claims_register.md":
-            check_claims_rows(lint, final_path, final_rows, final=True)
+            check_claims_rows(lint, proposal_path, proposal_rows, final=True)
         elif fname == "output_register.md":
-            check_output_rows(lint, final_path, final_rows, final=True)
+            check_output_rows(lint, proposal_path, proposal_rows, final=True)
         else:
-            check_error_rows(lint, final_path, final_rows, final=True)
-            final_code_register_path = final_path
-            for row in final_rows:
+            check_error_rows(lint, proposal_path, proposal_rows, final=True)
+            proposal_code_register_path = proposal_path
+            for row in proposal_rows:
                 if dict(zip(cols, row))["Status"] == "candidate":
-                    lint.fail(f"{final_path}: candidate status cannot survive b6b")
+                    lint.fail(f"{proposal_path}: candidate status cannot survive b6b")
         # Every register: a duplicate_of must name a present, terminal row
         # (the 241ce5e recheck-merge guarantee, restored at b6b).
-        _check_duplicate_chains(lint, final_path, final_rows, cols, id_col)
+        _check_duplicate_chains(lint, proposal_path, proposal_rows, cols, id_col)
     token_classifications = {}
     residual_ids = set()
     if stream == "code":
-        if final_code_register_path is not None:
+        if proposal_code_register_path is not None:
+            survival_view, _survival = load_view_register(
+                lint, "export_bound", "code_error_register.md", audit,
+                manifest, ERROR_COLS, allow_extra=True)
             check_detector_mapping_b6(
-                lint, audit, proposal_path=final_code_register_path,
-                survival_path=audit / "code_error_register.md")
-        error_rows = [row for row in final_by_all.values()
+                lint, audit, proposal_path=proposal_code_register_path,
+                survival_path=survival_view.source_path
+                if not isinstance(survival_view, (evidence_views.ViewRefusal,
+                                                  evidence_views.PrematureAsk))
+                else audit / "code_error_register.md")
+        error_rows = [row for row in proposal_by_all.values()
                       if str(row.get("Error ID", "")).startswith("E-")]
         if _u8_tokens_active(manifest, audit, "code_b6b", rows=error_rows):
             token_classifications = _final_token_partition(
@@ -4191,7 +4227,7 @@ def stage_b6b(lint, audit, stream, manifest):
             lint.fail(f"{plan}: supplementary ID {item} has {len(dispositions)} ledger rows; expected exactly one")
             continue
         path, ledger = dispositions[0]
-        final = final_by_all.get(item)
+        final = proposal_by_all.get(item)
         if final is None:
             lint.fail(f"{plan}: supplementary ID {item} vanished before b6b")
             continue
@@ -4258,7 +4294,7 @@ def stage_b6b(lint, audit, stream, manifest):
             summary,
             lo_path,
             *zero_surfaces,
-            *final_register_paths,
+            *proposal_register_paths,
         ])
 
 
@@ -4273,71 +4309,43 @@ def _bc_plan(lint, audit):
     text = read_text(lint, path)
     if text is None:
         return path, [], []
-    matches = [(rows, line) for headers, rows, line in parse_tables(text)
-               if headers == BC_PLAN_COLS]
-    if len(matches) != 1:
-        lint.fail(f"{path}: expected exactly one bC plan table with columns {' | '.join(BC_PLAN_COLS)}")
-        rows = []
-    else:
-        rows = []
-        for index, raw in enumerate(matches[0][0], start=1):
-            if len(raw) != len(BC_PLAN_COLS):
-                lint.fail(f"{path}: malformed plan row {index}")
-                continue
-            row = dict(zip(BC_PLAN_COLS, raw))
-            if not re.fullmatch(r"BC-\d{4}", row["BC ID"]):
-                lint.fail(f"{path}: invalid BC ID {row['BC ID']!r}")
-            if not re.fullmatch(r"LO-[CE]-\d{4}", row["LO ID"]):
-                lint.fail(f"{path}: invalid LO ID {row['LO ID']!r}")
-            if row["Register"] not in {"claims", "output", "code_error"}:
-                lint.fail(f"{path}: invalid Register {row['Register']!r}")
-            if row["Operation"] not in {"new_row", "patch"}:
-                lint.fail(f"{path}: invalid Operation {row['Operation']!r}")
-            try:
-                payload = json.loads(row["Payload JSON"])
-            except json.JSONDecodeError as exc:
-                lint.fail(f"{path}: {row['BC ID']} Payload JSON is invalid: {exc}")
-                payload = None
-            if not isinstance(payload, dict):
-                lint.fail(f"{path}: {row['BC ID']} Payload JSON must be an object")
-            row["_payload"] = payload or {}
-            rows.append(row)
-    ranges = [parse_range(f"{a}–{b}") for a, b in BC_RANGE_RE.findall(text)]
+    # The plan parsing lives in the authorization projection — the single
+    # rulebook every bC consumer reads.
+    path, rows, raw_ranges, failures = authorized_deltas.load_bc_plan(audit)
+    for failure in failures:
+        lint.fail(failure)
+    ranges = [parse_range(f"{a}–{b}") for a, b in raw_ranges]
     return path, rows, [item for item in ranges if item]
 
 
 def _check_bc_declared_cells(lint, final_path, headers, before_by_id,
-                             final_by_id, expected_patches):
+                             final_by_id, expected_patches,
+                             link_additions=None):
+    link_additions = link_additions or {}
     for row_id in set(before_by_id) & set(final_by_id):
         for field in headers:
             before_value = before_by_id[row_id][field]
             final_value = final_by_id[row_id][field]
+            additions = link_additions.get((row_id, field))
+            if additions:
+                # Reciprocal link derivation: after the post-bC b7
+                # replay-plus-extension, this cell holds exactly the bC
+                # baseline plus the plan-declared new-row referrers; before
+                # that rerun it still holds the baseline.
+                letter = "E" if field == "Related Error IDs" else "C"
+                observed = set(ids_in(final_value, letter))
+                baseline = set(ids_in(before_value, letter))
+                if observed not in (baseline, baseline | set(additions)):
+                    lint.fail(f"{final_path}: undeclared bC cell change at {row_id}.{field}")
+                continue
             expected = expected_patches.get((row_id, field), before_value)
             if final_value != expected:
                 lint.fail(f"{final_path}: undeclared bC cell change at {row_id}.{field}")
 
 
-def _bc_new_row_matches(payload, final_row, headers, rewrite_pairs):
-    """Compare a bC payload before or after the authorized b8 rewrite pass."""
-    if set(payload) != set(headers):
-        return False
-    by_base = dict(rewrite_pairs)
-    by_original = {original: base for base, original in rewrite_pairs}
-    for field in headers:
-        if field in by_base:
-            original = by_base[field]
-            observed = final_row.get(original, "")
-            if blank_cell(observed):
-                observed = final_row.get(field, "")
-            if payload.get(field) != observed:
-                return False
-        elif field in by_original and blank_cell(payload.get(field, "")):
-            if final_row.get(field, "") not in {payload.get(field, ""),
-                                                 payload.get(by_original[field], "")}:
-                return False
-        elif payload.get(field) != final_row.get(field):
-            return False
-    return True
+# The payload comparison lives in the authorization projection; the alias
+# keeps this module's public name stable.
+_bc_new_row_matches = authorized_deltas.payload_matches_row
 
 
 def stage_bC(lint, audit, manifest):
@@ -4359,9 +4367,17 @@ def stage_bC(lint, audit, manifest):
         if not path.is_file():
             continue
         _path, rows, dispositions = _late_observation_rows(lint, audit, stream)
-        snapshot_path = audit / "_run/snapshots/bC" / path.name
-        _snapshot_path, old_rows, old_dispositions = _late_observation_rows(
-            lint, audit, stream, snapshot_path)
+        snapshot = evidence_views.resolve(
+            "bC_correction", path.name, audit, manifest)
+        if isinstance(snapshot, (evidence_views.ViewRefusal,
+                                 evidence_views.PrematureAsk)):
+            lint.fail(str(snapshot))
+            old_rows, old_dispositions = [], []
+        else:
+            if has_conflict_markers(snapshot.text):
+                lint.fail(f"conflict marker in {snapshot.source_path}")
+            _snapshot_path, old_rows, old_dispositions = _late_observation_rows(
+                lint, audit, stream, snapshot.source_path, text=snapshot.text)
         if old_rows != rows:
             lint.fail(f"{path}: bC cannot add, delete, or edit late-observation evidence")
         old_states = {row["LO ID"]: row["State"] for row in old_dispositions}
@@ -4406,9 +4422,10 @@ def stage_bC(lint, audit, manifest):
     for register, (filename, base_cols, id_col) in register_contracts.items():
         if mode == "code_errors_only" and register != "code_error":
             continue
-        before_path = audit / "_run/snapshots/bC" / filename
         final_path = audit / filename
-        before = load_register(lint, before_path, base_cols, allow_extra=True)
+        _before_view, before = load_view_register(
+            lint, "bC_correction", filename, audit, manifest, base_cols,
+            allow_extra=True)
         final = load_register(lint, final_path, base_cols, allow_extra=True)
         if before is None or final is None:
             continue
@@ -4465,9 +4482,11 @@ def stage_bC(lint, audit, manifest):
                 lint.fail(f"{plan_path}: patch {row['BC ID']} old-value hash disagrees with the bC snapshot")
             expected_patches[(row["Row ID"], field)] = payload["new_value"]
             touched_by_bc.setdefault(row["BC ID"], set()).add(register)
+        replay_delta, _replay_failures = authorized_deltas.permitted_delta(
+            "bC_correction", "export_bound", filename, audit, manifest)
         _check_bc_declared_cells(
             lint, final_path, final_headers, before_by_id, final_by_id,
-            expected_patches)
+            expected_patches, replay_delta.link_additions)
         projected_final_rows = [
             [dict(zip(final_headers, row)).get(column, "") for column in base_cols]
             for row in final_rows
@@ -4519,22 +4538,55 @@ def stage_bC(lint, audit, manifest):
 
 def non_link_identical(
         lint, st_rows, st_cols, sn_rows, base_cols, idc, link_col,
-        rewrite_pairs, label, authorized_changes=()):
-    """Every non-link column must still match the b7 snapshot. Replay-aware: after b8 has run,
+        rewrite_pairs, label, delta=None, enforce_links=False):
+    """Every non-link column must still match the anchor snapshot, modulo the
+    authorization projection's permitted ``delta``. Replay-aware: after b8 has run,
     staging carries the `*Original` columns and its base rewrite-pair columns are rewritten in
     place — so when a rewrite-pair's `*Original` column is present, compare the snapshot's base
     value against that `*Original` (the frozen text) rather than the rewritten base column. Every
     other non-link column compares directly. Staging rows are read under their own header order
-    (`st_cols`) so extra `*Original` columns never misalign the values."""
+    (`st_cols`) so extra `*Original` columns never misalign the values.
+
+    ``delta.added_rows`` must equal their plan payloads exactly;
+    ``delta.exact_cells`` must hold exactly the authorized value; with
+    ``enforce_links`` (the post-bC replay-plus-extension era) the link column
+    must equal the anchor's id set plus exactly ``delta.link_additions``."""
+    delta = delta or authorized_deltas.EMPTY_DELTA
     st = {dict(zip(st_cols, r))[idc]: dict(zip(st_cols, r)) for r in st_rows}
     sn = {dict(zip(base_cols, r))[idc]: dict(zip(base_cols, r)) for r in sn_rows}
-    if set(st) != set(sn):
+    if set(st) != set(sn) | set(delta.added_rows):
         lint.fail(f"{label}: ID sets differ between staging and snapshot")
         return
     rewrite_base = {base: orig for base, orig in rewrite_pairs}
     for i, row in st.items():
+        if i in delta.added_rows:
+            if not authorized_deltas.payload_matches_row(
+                    delta.added_rows[i], row, st_cols, rewrite_pairs):
+                lint.fail(
+                    f"{label}: bC-added row {i} does not match its "
+                    "correction-plan payload")
+            continue
         for c in base_cols:
-            if c == link_col or c in authorized_changes:
+            if c == link_col:
+                if enforce_links:
+                    letter = "E" if c == "Related Error IDs" else "C"
+                    additions = delta.link_additions.get((i, c), frozenset())
+                    observed = set(ids_in(row.get(c, ""), letter))
+                    baseline = set(ids_in(sn[i][c], letter))
+                    if observed != baseline | set(additions):
+                        lint.fail(
+                            f"{label}: {i} link column '{c}' departs from "
+                            "the derived reciprocal state")
+                continue
+            exact = delta.exact_cells.get((i, c))
+            if exact is not None:
+                # The anchor value is lawful while staging predates the
+                # authorized apply (rulings mutate canon, not staging);
+                # anything other than anchor-or-authorized is tampering.
+                if row.get(c, "") not in {sn[i][c], exact}:
+                    lint.fail(
+                        f"{label}: {i} column '{c}' departs from the "
+                        "authorized ruling value")
                 continue
             orig_col = rewrite_base.get(c)
             if orig_col and orig_col in st_cols:
@@ -4701,59 +4753,92 @@ def check_pairs_listed(lint, summary, section, pairs, stage, reason):
 
 
 def _severity_token_rulings_done(manifest):
-    stages = (manifest or {}).get("stages", {})
-    if not isinstance(stages, dict):
-        return False
-    entry = stages.get("severity_token_rulings")
-    return isinstance(entry, dict) and entry.get("status") == "done"
+    return evidence_views.stage_done(manifest, "severity_token_rulings")
 
 
 def b7_classification_errors(
         lint, audit, manifest, current_headers, current_rows):
-    """Use the immutable pre-ruling register for b7-era classifications."""
-    if not _severity_token_rulings_done(manifest):
+    """Resolve the immutable ``b7_classification`` view for b7-era
+    classifications, extended with exactly the correction plan's new rows
+    once ``bC`` is ``done``.  A missing or malformed view fails closed —
+    the mutable register never substitutes."""
+    resolved = evidence_views.resolve(
+        "b7_classification", "code_error_register.md", audit, manifest or {})
+    if isinstance(resolved, evidence_views.ViewRefusal):
+        lint.fail(str(resolved))
         return current_headers, current_rows
-    snapshot = audit / severity_token_rulings.SNAPSHOT_REGISTER
-    if not snapshot.is_file():
-        # Snapshot integrity is enforced by the rulings transition and its
-        # verify/resume obligation. Keep b7/b8's classification helper scoped
-        # to honest replay rather than adding a second ownership site.
-        return current_headers, current_rows
-    frozen = load_register(
-        lint,
-        snapshot,
-        ERROR_COLS,
-    )
-    if frozen is None:
-        return current_headers, current_rows
-    return frozen[0], [
-        row for row in frozen[1] if not is_example_row(row)
-    ]
+    if resolved.source_path == audit / severity_token_rulings.SNAPSHOT_REGISTER:
+        frozen = load_register(lint, resolved.source_path, ERROR_COLS)
+        if frozen is None:
+            return current_headers, current_rows
+        headers = list(frozen[0])
+        rows = [row for row in frozen[1] if not is_example_row(row)]
+    else:
+        # The rulings boundary has not been reached: the live rows the
+        # caller already holds are the b7-era classification state.
+        headers, rows = current_headers, current_rows
+    if evidence_views.stage_done(manifest, "bC"):
+        bc_delta, bc_failures = authorized_deltas.permitted_delta(
+            "bC_correction", "export_bound", "code_error_register.md",
+            audit, manifest)
+        for failure in bc_failures:
+            lint.fail(failure)
+        rows = list(rows) + [
+            [str(bc_delta.added_rows[row_id].get(column, ""))
+             for column in headers]
+            for row_id in sorted(bc_delta.added_rows)
+        ]
+    return headers, rows
 
 
 def stage_b7(lint, audit, manifest=None):
-    snap = audit / "_run" / "snapshots" / "b7"
     staging = audit / "_staging"
     # Replay mode: load staging with allow_extra=True so a post-b8 re-run (staging carries the
     # `*Original` rewrite columns) still finds the table; the snapshot keeps the exact base cols.
     c = load_register(lint, staging / "claims_register.md", CLAIMS_COLS, allow_extra=True)
     e = load_register(lint, staging / "code_error_register.md", ERROR_COLS, allow_extra=True)
-    cs = load_register(lint, snap / "claims_register.md", CLAIMS_COLS)
-    es = load_register(lint, snap / "code_error_register.md", ERROR_COLS)
+    # The anchor is the b6b_proposal view — the frozen post-b6b state.
+    _cs_view, cs = load_view_register(
+        lint, "b6b_proposal", "claims_register.md", audit, manifest,
+        CLAIMS_COLS)
+    _es_view, es = load_view_register(
+        lint, "b6b_proposal", "code_error_register.md", audit, manifest,
+        ERROR_COLS)
     if None in (c, e, cs, es):
         return
     # the allow_extra path does not drop schema example rows — filter them here so ID sets match
     c_headers, c_rows = list(c[0]), [r for r in c[1] if not is_example_row(r)]
     e_headers, e_rows = list(e[0]), [r for r in e[1] if not is_example_row(r)]
     rulings_done = _severity_token_rulings_done(manifest)
+    bc_active = evidence_views.stage_done(manifest, "bC")
+    claims_delta = authorized_deltas.EMPTY_DELTA
+    error_delta = authorized_deltas.EMPTY_DELTA
+    if rulings_done:
+        rulings_delta, rulings_failures = authorized_deltas.permitted_delta(
+            "pre_ruling", "rulings_applied", "code_error_register.md",
+            audit, manifest)
+        for failure in rulings_failures:
+            lint.fail(failure)
+        error_delta = error_delta.compose(rulings_delta)
+    if bc_active:
+        for register in ("claims_register.md", "code_error_register.md"):
+            bc_delta, bc_failures = authorized_deltas.permitted_delta(
+                "bC_correction", "export_bound", register, audit, manifest)
+            for failure in bc_failures:
+                lint.fail(failure)
+            if register == "claims_register.md":
+                claims_delta = claims_delta.compose(bc_delta)
+            else:
+                error_delta = error_delta.compose(bc_delta)
     non_link_identical(
         lint, c_rows, c_headers, cs[1], CLAIMS_COLS, "Claim ID", "Related Error IDs",
         REWRITE_PAIRS["claims_register.md"], "b7 claims",
+        delta=claims_delta, enforce_links=bc_active,
     )
     non_link_identical(
         lint, e_rows, e_headers, es[1], ERROR_COLS, "Error ID", "Related Claim IDs",
         REWRITE_PAIRS["code_error_register.md"], "b7 errors",
-        authorized_changes=({"Status", "Severity"} if rulings_done else ()),
+        delta=error_delta, enforce_links=bc_active,
     )
     classification_e_headers, classification_e_rows = b7_classification_errors(
         lint, audit, manifest, e_headers, e_rows)
@@ -4806,14 +4891,10 @@ def stage_b7(lint, audit, manifest=None):
     if (_u8_tokens_active(manifest or {}, audit, FINAL_TOKEN_RECEIPT_HOMES,
                           rows=b7_error_rows)
             or "## Severity-token adjudications" in (summary or "")):
-        b7_register = None
-        if rulings_done:
-            b7_register = (
-                audit / "_run/snapshots/severity_token_rulings/"
-                "code_error_register.md"
-            )
+        # validate_b7 resolves the b7_classification view itself; no
+        # register selection happens here.
         _rejected, severity_failures = severity_token_rulings.validate_b7(
-            audit.parent, audit, manifest or {}, register_path=b7_register)
+            audit.parent, audit, manifest or {})
         for failure in severity_failures:
             lint.fail(f"b7 severity-token sweep: {failure}")
 
@@ -4825,18 +4906,11 @@ def stage_severity_token_rulings(lint, audit, manifest):
         lint.fail(f"severity-token rulings: {failure}")
 
 
-REWRITE_PAIRS = {
-    "claims_register.md": [("Issue Description", "Issue Description Original")],
-    "code_error_register.md": [
-        ("Error Description", "Error Description Original"),
-        ("Why It Matters", "Why It Matters Original"),
-    ],
-}
+REWRITE_PAIRS = authorized_deltas.REWRITE_PAIRS
 FINAL_TOKEN_RECEIPT_HOMES = ("code_b6b", "bC")
 
 
 def stage_b8(lint, audit, manifest):
-    snap = audit / "_run" / "snapshots" / "b8"
     staging = audit / "_staging"
     mode = (manifest or {}).get("mode", "replication")
     staging_error_rows = list(severity_tokens._load_register_error_rows(
@@ -4857,9 +4931,25 @@ def stage_b8(lint, audit, manifest):
                     lint.fail(f"{audit / 'output_register.md'}: {d['Output ID']} still 'listed' at b8 (transient status)")
     base_cols = {"claims_register.md": CLAIMS_COLS, "code_error_register.md": ERROR_COLS}
     idc = {"claims_register.md": "Claim ID", "code_error_register.md": "Error ID"}
+    link_cols = {"claims_register.md": "Related Error IDs",
+                 "code_error_register.md": "Related Claim IDs"}
+    bc_active = evidence_views.stage_done(manifest, "bC")
+    bc_deltas = {}
+    for f in files:
+        if bc_active:
+            bc_delta, bc_failures = authorized_deltas.permitted_delta(
+                "bC_correction", "export_bound", f, audit, manifest)
+            for failure in bc_failures:
+                lint.fail(failure)
+        else:
+            bc_delta = authorized_deltas.EMPTY_DELTA
+        bc_deltas[f] = bc_delta
     for f in files:
         st = load_register(lint, staging / f, base_cols[f], allow_extra=True)
-        sn = load_register(lint, snap / f, base_cols[f])
+        # The anchor is the rulings_applied view — the register state at
+        # rulings finish, i.e. b8's own start image once minted.
+        _sn_view, sn = load_view_register(
+            lint, "rulings_applied", f, audit, manifest, base_cols[f])
         if st is None or sn is None:
             continue
         st_headers, st_rows = st
@@ -4877,17 +4967,45 @@ def stage_b8(lint, audit, manifest):
         for new_col, orig_col in REWRITE_PAIRS[f]:
             if orig_col not in st_headers:
                 lint.fail(f"{staging / f}: missing column '{orig_col}'")
-        if len(st_rows) != len(sn_rows):
-            lint.fail(f"{staging / f}: row count changed at rewrite ({len(st_rows)} vs {len(sn_rows)})")
-            continue
         st_by = {dict(zip(st_headers, r))[idc[f]]: dict(zip(st_headers, r)) for r in st_rows}
+        if len(st_by) != len(st_rows):
+            # The set comparison below dict-collapses duplicate IDs, so a
+            # divergent earlier copy would be shadowed silently.
+            lint.fail(f"{staging / f}: duplicate register row IDs at rewrite")
+            continue
         sn_by = {dict(zip(base_cols[f], r))[idc[f]]: dict(zip(base_cols[f], r)) for r in sn_rows}
-        if set(st_by) != set(sn_by):
+        bc_delta = bc_deltas[f]
+        if set(st_by) != set(sn_by) | set(bc_delta.added_rows):
             lint.fail(f"{staging / f}: ID set changed at rewrite")
             continue
         frozen = [c for c in base_cols[f] if c not in [p[0] for p in REWRITE_PAIRS[f]]]
         for i, row in st_by.items():
+            if i in bc_delta.added_rows:
+                if not authorized_deltas.payload_matches_row(
+                        bc_delta.added_rows[i], row, st_headers,
+                        REWRITE_PAIRS[f]):
+                    lint.fail(
+                        f"{staging / f}: bC-added row {i} does not preserve "
+                        "its correction-plan payload through rewrite")
+                continue
             for c in frozen:
+                exact = bc_delta.exact_cells.get((i, c))
+                if exact is not None:
+                    if row.get(c, "") != exact:
+                        lint.fail(
+                            f"{staging / f}: {i} column '{c}' departs from "
+                            "the declared bC patch")
+                    continue
+                if bc_active and c == link_cols[f]:
+                    letter = "E" if c == "Related Error IDs" else "C"
+                    additions = bc_delta.link_additions.get((i, c), frozenset())
+                    observed = set(ids_in(row.get(c, ""), letter))
+                    baseline = set(ids_in(sn_by[i][c], letter))
+                    if observed != baseline | set(additions):
+                        lint.fail(
+                            f"{staging / f}: {i} link column '{c}' departs "
+                            "from the derived reciprocal state")
+                    continue
                 if row.get(c, "") != sn_by[i][c]:
                     lint.fail(f"{staging / f}: {i} column '{c}' changed at rewrite")
             for new_col, orig_col in REWRITE_PAIRS[f]:
