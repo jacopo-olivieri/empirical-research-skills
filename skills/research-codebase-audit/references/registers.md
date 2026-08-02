@@ -740,13 +740,16 @@ Token Key is `E-#### <literal token>`, Verdict is `upheld` or `rejected`, and ex
 carve-out does not apply. b7 recomputes every target. A non-live token must be `rejected`—an
 `upheld` value is a deterministic certification failure.
 
-The full-mode-only `severity_token_rulings` stage freezes the sorted LF-joined rejected Token
-Key lines; `b7_certification_sha256` is SHA-256 of exactly those UTF-8 bytes. Its authority file
-`audit/_run/severity_token_rulings.json` has schema `severity_token_rulings/v1`, `cycle: main`,
-that digest, and one exact ruling per rejected Error ID with fields `error_id`, `token`,
-`b7_verdict`, `ruling`, `resulting_status`, `resulting_severity`, `rationale`, and
-`decision_identity`. `uphold` retains the pre-stage Status/Severity 3–4 and requires a currently
-live target; `cap` retains Status and sets Severity 1–2; `hold` sets
+The full-mode-only `severity_token_rulings` stage freezes the sorted rejected Token Key lines
+and the exact pre-ruling code register. The certifier hashes the register bytes as
+`b7_register_sha256`, then constructs canonical JSON containing `lines` and `b7_register_sha256`
+(sorted keys, `,`/`:` separators, no added whitespace or newline);
+`b7_certification_sha256` is SHA-256 of exactly those UTF-8 canonical JSON bytes. Its authority
+file `audit/_run/severity_token_rulings.json` has schema `severity_token_rulings/v1`,
+`cycle: main`, that generated digest, and one exact ruling per rejected Error ID with fields
+`error_id`, `token`, `b7_verdict`, `ruling`, `resulting_status`, `resulting_severity`,
+`rationale`, and `decision_identity`. `uphold` retains the pre-stage Status/Severity 3–4 and
+requires a currently live target; `cap` retains Status and sets Severity 1–2; `hold` sets
 `confirmation_needed`/Severity 1–2. With zero rejected keys, the exact extra fields are
 `skip_reason: zero_rejected_severity_tokens` and `rulings: []`.
 

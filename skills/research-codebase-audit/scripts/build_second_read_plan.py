@@ -14,6 +14,7 @@ import sys
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
+import build_detector_mapping as detector_mapping
 import lint_registers as lr
 
 
@@ -144,16 +145,16 @@ def _detector_paths(audit, rows, inventory):
     mapping = audit / "_run/detector_mapping.md"
     if not mapping.is_file():
         return set()
-    mapped = _table(
-        _read(mapping), lambda h: h == detector_columns(), "detector mapping")
-    ids = {row["Error ID"] for row in mapped
-           if row["Mapping Kind"] in {"new_candidate", "existing_row"}}
+    try:
+        _declared, _display, mapped = detector_mapping.load_mapping(mapping)
+    except detector_mapping.MappingError as exc:
+        raise PlanError(str(exc)) from exc
+    ids = {
+        row["Error ID"]
+        for row in detector_mapping.actionable_rows(mapped)
+    }
     return {path for row in rows if row["Error ID"] in ids
             for path in _source_paths(row["Code/Data Source"], inventory)}
-
-
-def detector_columns():
-    return ["Channel", "Source ID", "Witness ID", "Error ID", "Mapping Kind", "Site Anchor"]
 
 
 def _flagged_paths(rows, inventory, depth):

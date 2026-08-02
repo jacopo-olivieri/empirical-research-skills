@@ -105,9 +105,13 @@ close-run refusal.
 
 Start this stage immediately after certified b7. The certifier freezes the certified b7
 rejected-token worklist and code register and derives `b7_certification_sha256`. The trusted
-operator writes `audit/_run/severity_token_rulings.json` in the exact schema and closed
-uphold/cap/hold matrix from `registers.md`; no worker or conductor invents a default decision.
-With no rejected tokens, write the exact `zero_rejected_severity_tokens` skip form.
+operator reads
+`audit/_run/snapshots/severity_token_rulings/b7_rejected_worklist.json` and must copy its `b7_certification_sha256`
+exactly into `audit/_run/severity_token_rulings.json`, then writes the
+remaining authority fields in the exact schema and closed uphold/cap/hold matrix from
+`registers.md`; do not recompute the digest by hand, and no worker or conductor invents a
+default decision. With no rejected tokens, write the exact `zero_rejected_severity_tokens`
+skip form.
 
 Finish the stage. The certifier snapshots the authority artifact, atomically applies only
 Status/Severity, and reruns `lint_registers.py --stage severity_token_rulings`. Missing coverage

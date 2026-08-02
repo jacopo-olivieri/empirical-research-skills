@@ -493,6 +493,8 @@ def _completed_severity_tail(tmp_path):
         "severity_token_rulings": {"status": "done", "retries": 0},
         "b8": {"status": "done", "retries": 0},
     }
+    manifest["certified_stage_evidence_version"] = (
+        certify.CERTIFIED_EVIDENCE_VERSION)
     manifest["run_identity"] = certify.make_run_identity(root.resolve(), manifest)
     a.write("_run/manifest.json", json.dumps(manifest, indent=2) + "\n")
     return root, a
@@ -712,6 +714,11 @@ def _residual_tail(tmp_path, *, target_in_dispatch=False, status="confirmation_n
     a.write_register("_run/snapshots/b8/claims_register.md", rb.CLAIMS_COLS, [])
     a.write_register("_run/snapshots/b8/code_error_register.md",
                      rb.ERROR_COLS, [row])
+    # The manifest marks severity_token_rulings done, so the fail-closed
+    # b7_classification view requires its frozen pre-ruling register.
+    a.write_register(
+        "_run/snapshots/severity_token_rulings/code_error_register.md",
+        rb.ERROR_COLS, [row])
     claims_cols, claims_rows = rb.rewrite_pass_cols(
         rb.CLAIMS_COLS, [], ["Issue Description"])
     error_cols, error_rows = rb.rewrite_pass_cols(
@@ -1110,15 +1117,18 @@ def test_expected_code_token_obligations_derives_discovery_late_split(tmp_path):
 
 
 def _severity_plant_audit(tmp_path, *, arm_b_severity="2",
-                          arm_b_status="confirmed", with_receipt=True):
+                          arm_b_status="confirmed", with_receipt=True,
+                          arm_a_severity="3", arm_a_token=True):
     root = tmp_path / "package"
     a = rb.AuditDir(root)
     a.write_manifest(mode="replication")
     token = "output:O-0300"
+    arm_a_why = (f"feeds the reported Table 2 means {token}"
+                 if arm_a_token else "feeds the reported Table 2 means")
     rows = [
-        rb.error_row("E-0301", status="confirmed", severity="3",
+        rb.error_row("E-0301", status="confirmed", severity=arm_a_severity,
                      desc="income_pc divides by age_head, not household size",
-                     why=f"feeds the reported Table 2 means {token}"),
+                     why=arm_a_why),
         rb.error_row("E-0302", status=arm_b_status, severity=arm_b_severity,
                      desc="wage_pc divides by age_head and is never read"),
         rb.error_row("E-0303", status="confirmed", severity="2",
@@ -1158,3 +1168,114 @@ def test_scorer_severity_plants_pass_and_enforce_bands_and_receipt(tmp_path):
     audit = _severity_plant_audit(tmp_path / "receipt", with_receipt=False)
     status, note = sf.check_severity_token_plants(audit, expected)
     assert status == "FAIL" and "verifier token receipt" in note
+
+
+def _expected_key():
+    return json.loads(sf.DEFAULT_EXPECTED.read_text(encoding="utf-8"))
+
+
+def test_scorer_p27_band_disengages_receipt_below_severe(tmp_path):
+    expected = _expected_key()
+    # Happy: confirmed at severity 2 with no token in the carrier passes.
+    audit = _severity_plant_audit(tmp_path / "sev2", arm_a_severity="2",
+                                  arm_a_token=False, with_receipt=False)
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "PASS", note
+    assert "P-27 E-0301 confirmed sev=2" in note
+    # Pinned edge: an unreceipted token on a severity-2 close also passes —
+    # the receipt machinery is disengaged below the severe threshold.
+    audit = _severity_plant_audit(tmp_path / "sev2tok", arm_a_severity="2",
+                                  arm_a_token=True, with_receipt=False)
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "PASS", note
+
+
+def test_scorer_p27_severe_close_still_binds_token_and_receipt(tmp_path):
+    expected = _expected_key()
+    # Happy: severity 3 with exactly one receipted output: token passes.
+    audit = _severity_plant_audit(tmp_path / "sev3")
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "PASS", note
+    # Error: severity 3 with NO token fails on the carrier requirement.
+    audit = _severity_plant_audit(tmp_path / "notoken", arm_a_token=False,
+                                  with_receipt=False)
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "FAIL" and "must hold exactly one output: token" in note
+    # Error: severity 3 with a token but no verifier receipt fails.
+    audit = _severity_plant_audit(tmp_path / "noreceipt", with_receipt=False)
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "FAIL" and "verifier token receipt" in note
+
+
+def test_scorer_p27_band_bounds_fail_outside_2_to_3(tmp_path):
+    expected = _expected_key()
+    audit = _severity_plant_audit(tmp_path / "sev1", arm_a_severity="1",
+                                  arm_a_token=False, with_receipt=False)
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "FAIL", note
+    assert "P-27" in note and "below" in note and "2" in note
+    audit = _severity_plant_audit(tmp_path / "sev4", arm_a_severity="4")
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "FAIL", note
+    assert "P-27" in note and "exceeds" in note and "3" in note
+
+
+def _merged_plant_audit(tmp_path, *, severity, with_token=False):
+    """ONE register row matching the P-27, P-28, and P-29 signatures."""
+    root = tmp_path / "package"
+    a = rb.AuditDir(root)
+    a.write_manifest(mode="replication")
+    token = "output:O-0300"
+    why = ("wrong denominator family; feeds the reported Table 2 means "
+           + token if with_token else
+           "wrong denominator family; wage_pc and crop_pc never reach output")
+    row = rb.error_row(
+        "E-0310", status="confirmed", severity=severity,
+        desc="income_pc, wage_pc, and crop_pc all divide by age_head",
+        why=why)
+    a.write_register("code_error_register.md", rb.ERROR_COLS, [row])
+    a.write_register("output_register.md", rb.OUTPUT_COLS,
+                     [rb.output_row("O-0300", obj="Table 2",
+                                    location="`paper/paper.tex:70`")])
+    receipts = []
+    if with_token:
+        digest = "a" * 64
+        receipts = [{
+            "Receipt ID": tokens.receipt_id("E-0310", token, digest),
+            "Error ID": "E-0310", "Token": token, "Obligation Digest": digest,
+            "Probe Path": "token_probe.py",
+            "Probe Output SHA256": "b" * 64, "Verdict": "verified",
+        }]
+    tokens.write_atomic(a.audit / "_run/code_b6b/token_receipts.md",
+                        tokens.render_receipts(receipts))
+    return a.audit
+
+
+def test_scorer_merged_row_passes_all_three_plants_at_severity_2(tmp_path):
+    expected = _expected_key()
+    audit = _merged_plant_audit(tmp_path, severity="2")
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "PASS", note
+    assert "P-27 E-0310" in note and "P-28 E-0310" in note \
+        and "P-29 E-0310" in note
+
+
+def test_scorer_merged_row_at_severity_3_fails_arm_b_and_c_bands(tmp_path):
+    expected = _expected_key()
+    # The receipted token satisfies P-27, so the failure is genuinely the
+    # P-28 band; bands bind regardless of status.
+    audit = _merged_plant_audit(tmp_path, severity="3", with_token=True)
+    status, note = sf.check_severity_token_plants(audit, expected)
+    assert status == "FAIL", note
+    assert "P-28" in note and "exceeds" in note \
+        and "regardless of status" in note
+    # P-29's band fails on the same row too (checked in isolation because
+    # the scorer stops at the first failing plant).
+    only_p29 = dict(expected)
+    only_p29["severity_token_plants"] = [
+        item for item in expected["severity_token_plants"]
+        if item["id"] == "P-29"]
+    status, note = sf.check_severity_token_plants(audit, only_p29)
+    assert status == "FAIL", note
+    assert "P-29" in note and "exceeds" in note \
+        and "regardless of status" in note
