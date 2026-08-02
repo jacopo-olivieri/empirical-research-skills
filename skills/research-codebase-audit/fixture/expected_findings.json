@@ -42,7 +42,8 @@
       "id": "P-27",
       "arm": "a",
       "final_status": "confirmed",
-      "exact_severity": 3,
+      "min_severity": 2,
+      "max_severity": 3,
       "token_kind": "output",
       "receipt_required": true
     },

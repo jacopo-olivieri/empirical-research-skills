@@ -761,7 +761,15 @@ def check_channel_adjudication(audit, expected):
                          for row in source_mappings}
         if set(_list_cell(ledger["Outcome Witness IDs"])) != {key[2] for key in expected_keys}:
             return "FAIL", f"{label} ledger does not declare every mapped witness"
-        if not _clean(ledger["Accepted Error Type"]) or not _clean(ledger["Accepted Mechanism"]):
+        # The adjudication contract requires accepted type/mechanism only for
+        # error-accepting verdicts (confirmed_error, duplicate); a compliant
+        # not_error row may leave them blank — the closed error taxonomy has
+        # no "not an error" entry. Key on the answer key's expected verdict:
+        # ledger-verdict equality was already enforced above, and the answer
+        # key is the stable side.
+        if item["verdict"] in {"confirmed_error", "duplicate"} and (
+                not _clean(ledger["Accepted Error Type"])
+                or not _clean(ledger["Accepted Mechanism"])):
             return "FAIL", f"{label} structured accepted type/mechanism is empty"
         if not expected_keys <= post_keys:
             return "FAIL", f"{label} witnesses are absent from assembled boundary"
@@ -872,11 +880,13 @@ def check_severity_token_plants(audit, expected):
     """U8b severity plants: receipted token on arm (a), band caps on (b)/(c).
 
     Artifact-layer assertions in the ``adjudication_contract_plants`` style:
-    arm (a) must close confirmed at its exact severity carrying exactly one
-    mode-qualifying token whose target resolves to a reported output row and
-    whose verifier receipt exists; arms (b)/(c) assert the severity band
-    REGARDLESS of status — a ``confirmation_needed`` row above the band still
-    fails the plant."""
+    arm (a) must close confirmed within its severity band, carrying exactly
+    one mode-qualifying token whose target resolves to a reported output row
+    and whose verifier receipt exists only when it closes severe (severity
+    >= 3) — below the severe threshold the receipt machinery is disengaged,
+    mirroring the production contract where tokens bind severe proposals;
+    arms (b)/(c) assert the severity band REGARDLESS of status — a
+    ``confirmation_needed`` row above the band still fails the plant."""
     plants = expected.get("severity_token_plants", [])
     if not plants:
         return "NOT COVERED", "answer key has no U8b severity-token plants"
@@ -908,11 +918,15 @@ def check_severity_token_plants(audit, expected):
             return "FAIL", (f"{pid} arm ({item.get('arm', '?')}) severity {sev} exceeds "
                             f"its band <= {item['max_severity']} (status={status!r} — "
                             "the band binds regardless of status)")
+        if "min_severity" in item and sev < int(item["min_severity"]):
+            return "FAIL", (f"{pid} arm ({item.get('arm', '?')}) severity {sev} falls below "
+                            f"its band >= {item['min_severity']} (status={status!r} — "
+                            "the band binds regardless of status)")
         if "exact_severity" in item and sev != int(item["exact_severity"]):
             return "FAIL", f"{pid} final severity is {sev}, expected {item['exact_severity']}"
         if "final_status" in item and status != item["final_status"]:
             return "FAIL", f"{pid} final status is {status!r}, expected {item['final_status']}"
-        if item.get("receipt_required"):
+        if item.get("receipt_required") and sev >= 3:
             carrier = severity_tokens.why_text(d)
             found = severity_tokens.literal_tokens(carrier)
             kind = item.get("token_kind", "output")

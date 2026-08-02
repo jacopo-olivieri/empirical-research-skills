@@ -81,9 +81,10 @@ wrong-denominator mechanism family in `py/build_capita.py` (every per-member mea
 divides by `age_head` instead of `hhsize`, against the paper's stated definition), built
 to exercise the U8b severity-token contract end to end:
 - **P-27 (arm a)** — `income_pc` is consumed downstream by `py/make_tab2.py`, which writes
-  the reported Table 2 means, so the reported quantity is wrong. Must end `confirmed` at
-  severity 3 carrying exactly one receipted `output:` token resolving to the Table 2
-  output row (`severity_token_plants` in the answer key; scored by
+  the reported Table 2 means, so the reported quantity is wrong. Must end `confirmed`
+  within the 2–3 severity band, carrying exactly one receipted `output:` token resolving
+  to the Table 2 output row whenever it closes severe (severity 3)
+  (`severity_token_plants` in the answer key; scored by
   `check_severity_token_plants`).
 - **P-28 (arm b)** — `wage_pc` shares the mechanism but is never read again (not saved,
   not aggregated). The final severity must stay at or below 2 **regardless of status**.

@@ -985,7 +985,23 @@ def test_b6_collision_receipt_must_bind_full_key(tmp_path):
     assert "lacks qualifying receipt coverage" in result.stdout
 
 
-def test_three_manifest_plants_score_green_end_to_end(tmp_path):
+_LEDGER_IDX = {column: index
+               for index, column in enumerate(rb.CODE_LEDGER_COLS)}
+
+
+def _shard_ledger_row(ledger_rows, eid):
+    return next(row for row in ledger_rows if row[_LEDGER_IDX["ID"]] == eid)
+
+
+def _manifest_plants_fixture(tmp_path):
+    """Build the three-plant U3b scorer tree (P-16, P-22, D-04) end to end.
+
+    Copies the planted manifests, writes every artifact the adjudication
+    traversal reads, runs verify_dismissals + assemble_boundary, and promotes
+    the staged register. Returns ``(a, expected, shard_rows)`` where
+    ``shard_rows`` is the ``(ledger_rows, outcome_rows, mf_records)`` triple,
+    so tests can mutate and rewrite the recheck shard after boundary assembly.
+    """
     assert bootstrap.ORACLE_PATH.is_file(), "pinned oracle must already be installed"
     root = tmp_path / "plants"
     root.mkdir()
@@ -1039,11 +1055,16 @@ def test_three_manifest_plants_score_green_end_to_end(tmp_path):
                     root / manifest, source_id, witness, record_id))
         verdict = "not_error" if eid == "E-7002" else "confirmed_error"
         severity = "—" if verdict == "not_error" else ("1" if eid == "E-7001" else "2")
+        # The adjudication contract requires accepted type/mechanism only on
+        # error-accepting verdicts; a compliant not_error row leaves them blank.
         ledger_rows.append(rb.code_ledger_row(
             eid, evidence=source_id, verdict=verdict,
             proposed_status="not_error" if verdict == "not_error" else "confirmed",
-            proposed_severity=severity, accepted_type="version_or_dependency_error",
-            accepted_mechanism="manifest usability adjudicated with authoritative consumer",
+            proposed_severity=severity,
+            accepted_type="" if verdict == "not_error"
+            else "version_or_dependency_error",
+            accepted_mechanism="" if verdict == "not_error"
+            else "manifest usability adjudicated with authoritative consumer",
             witness_ids="; ".join(witness_ids),
             record_ids="; ".join(record_ids) if record_ids else "—",
         ))
@@ -1089,6 +1110,13 @@ def test_three_manifest_plants_score_green_end_to_end(tmp_path):
         ],
         "must_find": [], "must_not_find": [], "expected_status_conflicts": [],
     }
+    return a, expected, (ledger_rows, outcome_rows, mf_records)
+
+
+def test_three_manifest_plants_score_green_end_to_end(tmp_path):
+    # Quiet direction: the compliant tree — including D-04's blank-accepted-
+    # fields not_error ledger row — scores PASS and the gate stays green.
+    a, expected, _shard_rows = _manifest_plants_fixture(tmp_path)
     expected_path = tmp_path / "u3b-expected.json"
     expected_path.write_text(json.dumps(expected), encoding="utf-8")
     scored = rb.run_script("score_fixture.py", "--audit-dir", a.audit,
@@ -1096,3 +1124,66 @@ def test_three_manifest_plants_score_green_end_to_end(tmp_path):
     assert scored.returncode == 0, scored.stdout + scored.stderr
     assert "U3b adjudication channel: PASS" in scored.stdout
     assert "GATE GREEN" in scored.stdout
+
+
+@pytest.mark.parametrize("blank_field",
+                         ["Accepted Error Type", "Accepted Mechanism"])
+@pytest.mark.parametrize("verdict,eid,label", [
+    ("confirmed_error", "E-7000", "P-16"),
+    ("duplicate", "E-7001", "P-22"),
+])
+def test_blank_accepted_field_fails_error_accepting_plants(
+        tmp_path, verdict, eid, label, blank_field):
+    # Firing direction: an error-accepting plant with a blank accepted field
+    # scores U3b FAIL naming that plant, for BOTH error-accepting verdicts.
+    a, expected, (ledger_rows, outcome_rows, mf_records) = (
+        _manifest_plants_fixture(tmp_path))
+    row = _shard_ledger_row(ledger_rows, eid)
+    if verdict == "duplicate":
+        # Recast the P-22 plant as the other error-accepting verdict so an
+        # implementation keyed to confirmed_error alone cannot pass.
+        row[_LEDGER_IDX["Verdict"]] = "duplicate"
+        row[_LEDGER_IDX["Proposed Status"]] = "duplicate_of:E-7000"
+        row[_LEDGER_IDX["Proposed Severity"]] = "—"
+        row[_LEDGER_IDX["Duplicate Target"]] = "E-7000"
+        plant = next(item for item in expected["adjudication_contract_plants"]
+                     if item["id"] == label)
+        plant["verdict"] = "duplicate"
+    row[_LEDGER_IDX[blank_field]] = ""
+    a.write("_code_error_recheck/k1.md",
+            _shard_text(ledger_rows, outcome_rows, mf_records))
+    status, note = scorer.check_channel_adjudication(a.audit, expected)
+    assert status == "FAIL"
+    assert f"{label} structured accepted type/mechanism is empty" in note
+
+
+def test_gate_run_shape_not_error_row_passes_accepted_fields(tmp_path):
+    # Regression pin for gate run 1's E-0352: a not_error ledger row with a
+    # declared witness, a verification Record ID present, and empty accepted
+    # fields must not trigger the accepted-fields failure.
+    a, expected, (ledger_rows, _outcomes, _records) = (
+        _manifest_plants_fixture(tmp_path))
+    row = _shard_ledger_row(ledger_rows, "E-7002")
+    assert row[_LEDGER_IDX["Verdict"]] == "not_error"
+    assert row[_LEDGER_IDX["Outcome Witness IDs"]] not in {"", "-", "—"}
+    assert row[_LEDGER_IDX["Verification Record IDs"]] not in {"", "-", "—"}
+    assert row[_LEDGER_IDX["Accepted Error Type"]] == ""
+    assert row[_LEDGER_IDX["Accepted Mechanism"]] == ""
+    status, note = scorer.check_channel_adjudication(a.audit, expected)
+    assert status == "PASS", note
+    assert "accepted type/mechanism is empty" not in note
+
+
+def test_not_error_row_with_populated_accepted_fields_still_passes(tmp_path):
+    # Edge: the contract permits (but does not require) accepted fields on a
+    # not_error disposition, so a populated row must also pass.
+    a, expected, (ledger_rows, outcome_rows, mf_records) = (
+        _manifest_plants_fixture(tmp_path))
+    row = _shard_ledger_row(ledger_rows, "E-7002")
+    row[_LEDGER_IDX["Accepted Error Type"]] = "version_or_dependency_error"
+    row[_LEDGER_IDX["Accepted Mechanism"]] = (
+        "manifest usability adjudicated with authoritative consumer")
+    a.write("_code_error_recheck/k1.md",
+            _shard_text(ledger_rows, outcome_rows, mf_records))
+    status, note = scorer.check_channel_adjudication(a.audit, expected)
+    assert status == "PASS", note
