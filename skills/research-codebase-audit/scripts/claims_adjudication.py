@@ -472,7 +472,11 @@ def _expected_adjudication_projection(package_root, audit, worklist, verdicts):
 
 def _register_text(headers, rows):
     def cell(value):
-        return str(value).replace("|", "\\|")
+        # Idempotent pipe-escaping: parsed cells retain their `\|` (split_row does
+        # not unescape), so escaping every `|` would double-escape pre-escaped
+        # cells (LaTeX abs-value bars like `\|A\|`) into `\\|` and corrupt the
+        # round-trip. Collapse existing `\|` first, then escape once.
+        return str(value).replace("\\|", "|").replace("|", "\\|")
     lines = ["# Claims register", "", "| " + " | ".join(headers) + " |",
              "| " + " | ".join(["---"] * len(headers)) + " |"]
     lines.extend("| " + " | ".join(cell(row.get(header, "")) for header in headers) + " |"

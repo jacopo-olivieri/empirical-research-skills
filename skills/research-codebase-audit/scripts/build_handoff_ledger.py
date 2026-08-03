@@ -127,14 +127,32 @@ def _claims_by_id(claims):
     return {claim["Claim ID"]: claim for claim in claims}
 
 
+_TWIN_NORM_CACHE = {}
+
+
+def _cached_twin_norm(audit_path):
+    """Memoize the constant (text, haystack, positions) per twin file.
+
+    The twin file does not change during a run, so this is byte-for-byte
+    behaviour-preserving; it only removes the redundant per-claim re-read and
+    re-normalization of the same 372KB twin (an O(obligations x claims) blowup).
+    """
+    cached = _TWIN_NORM_CACHE.get(audit_path)
+    if cached is None:
+        text = Path(audit_path).read_text(encoding="utf-8")
+        haystack, positions = _normalize_with_map(text)
+        cached = (text, haystack, positions)
+        _TWIN_NORM_CACHE[audit_path] = cached
+    return cached
+
+
 def _resolve_quote_in_intervals(entry, intervals, quote):
     """Resolve a quote uniquely within a worker's owned line intervals.
 
     Returns the resolved anchor dict, or None when the quote does not resolve
     to exactly one occurrence starting inside the intervals.
     """
-    text = Path(entry["audit_path"]).read_text(encoding="utf-8")
-    haystack, positions = _normalize_with_map(text)
+    text, haystack, positions = _cached_twin_norm(entry["audit_path"])
     needle = normalize_quote(quote)
     if not needle:
         return None
