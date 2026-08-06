@@ -400,6 +400,7 @@ def _mapping_tree(tmp_path, *, initialize=False):
     assert rb.run_script("check_manifests.py", root,
                          "--audit-dir", a.audit).returncode == 0
     rb.emit_argument_contracts(a)
+    rb.emit_path_derivations(a)
     sources = dm.parse_raw_sources(a.audit)
     source_id_value = next(iter(sources["AC"]))
     source = sources["AC"][source_id_value]
@@ -469,8 +470,10 @@ def test_a1_production_cli_refuses_deleted_mapping_row_and_false_zero(tmp_path):
     assert verified.returncode == 1 and "code_b3d" in verified.stderr
 
     prefix = original[:original.index(dm.MARKERS[3])]
-    mapping.write_text(prefix + dm.MARKERS[3] + "\n\n" + dm.AC_ZERO + "\n",
-                       encoding="utf-8")
+    suffix = original[original.index(dm.MARKERS[4]):]
+    mapping.write_text(
+        prefix + dm.MARKERS[3] + "\n\n" + dm.AC_ZERO + "\n\n" + suffix,
+        encoding="utf-8")
     false_zero = rb.run_script(
         "build_detector_mapping.py", root, "--audit-dir", a.audit, "--check")
     assert false_zero.returncode == 1 and "exactly close" in false_zero.stderr
@@ -504,6 +507,7 @@ def test_ac_source_with_two_witnesses_fans_out_one_candidate(tmp_path):
     assert rb.run_script("check_manifests.py", root,
                          "--audit-dir", a.audit).returncode == 0
     rb.emit_argument_contracts(a)
+    rb.emit_path_derivations(a)
     sources = dm.parse_raw_sources(a.audit)
     assert len(sources["AC"]) == 1
     source_id_value = next(iter(sources["AC"]))

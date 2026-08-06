@@ -19,7 +19,8 @@ Reference files (all paths relative to this skill's folder):
 - `references/prompts/` — fixed prompt skeletons with slot tables.
 - `scripts/lint_registers.py`, `scripts/blank_tex_comments.py`, `scripts/export_xlsx.py`,
   `scripts/check_manifests.py`, `scripts/emit_definition_use_bundles.py`,
-  `scripts/check_argument_contracts.py` (all conductor-invoked at
+  `scripts/check_argument_contracts.py`,
+  `scripts/emit_path_derivation_bundles.py` (all conductor-invoked at
   certified `b3d`; see `references/pipeline-code-errors.md`), `scripts/verify_dismissals.py`,
   `scripts/severity_tokens.py`, `scripts/severity_token_rulings.py`,
   `scripts/assemble_boundary.py`, and `scripts/certify_stage.py` (the only writer of stage status;
@@ -207,7 +208,7 @@ each stream:
 | `claims_adjudication` H/X capture verdicts | `claims_adjudication.py --check` | `references/pipeline-claims.md` |
 | `claims_b4`–`claims_b6b` (recheck → b6a merge → one b5s wave → b6b) | `b4-claims`, `b5-claims`, `b6a-claims`, `b5s-claims`, `b6b-claims` | `references/pipeline-claims.md` |
 | `code_b1`–`code_b3` (plan → chunk workers incl. hygiene → merge) | `b1-code`–`b3-code` | `references/pipeline-code-errors.md` |
-| `code_b3d` DU/MF/AC detector emission, conventions scan, and mapping (replication waits for certified `claims_b3c`) | `build_detector_mapping.py --check` via certification | `references/pipeline-code-errors.md` |
+| `code_b3d` DU/MF/AC/PD detector emission, conventions scan, and mapping (replication waits for certified `claims_b3c`) | `build_detector_mapping.py --check` via certification | `references/pipeline-code-errors.md` |
 | `code_b3b` (second-read recall sweep → merge) | `b3b-code` | `references/pipeline-code-errors.md` |
 | `code_b4`–`code_b6b` (recheck → b6a merge → one b5s wave → b6b) | `b4-code`, `b5-code`, `b6a-code`, `b5s-code`, `b6b-code` | `references/pipeline-code-errors.md` |
 | optional `bC` late-observation correction | `bC` | `references/pipeline-finalize.md` |

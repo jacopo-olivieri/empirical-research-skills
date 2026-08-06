@@ -71,6 +71,9 @@ PROBE_VERIFICATION_COLS = [
     "Proposition Tested", "Harness / Input Domain", "Observed Result",
     "Scope Anchor",
 ]
+# Channels whose dismissal record is an existence/identity attestation and so
+# uses the digest-carrying schema rather than the runnable-probe schema.
+DIGEST_RECORD_CHANNELS = {"MF", "PD"}
 RECEIPT_COLS = [
     "Channel", "Receipt ID", "Source ID", "Witness ID", "Record ID",
     "Tool", "Tool Version", "Input Digest (sha256)", "Invocation",
@@ -2721,12 +2724,13 @@ def check_detector_mapping_b6(
     ledgers_by_id = {}
     for path, row in ledger_rows:
         ledgers_by_id.setdefault(row.get("ID", ""), []).append((path, row))
-    ac_stamps = {}
-    if any(row["Channel"] == "AC" for row in mappings):
+    candidate_stamps = {}
+    if any(row["Channel"] in detector_mapping.STAMP_CHANNELS for row in mappings):
         try:
-            ac_stamps = detector_mapping.expected_ac_stamps(audit, mappings)
+            candidate_stamps = detector_mapping.expected_candidate_stamps(
+                audit, mappings)
         except (detector_mapping.MappingError, OSError) as exc:
-            lint.fail(f"argument-contract stamp binding cannot resolve: {exc}")
+            lint.fail(f"detector stamp binding cannot resolve: {exc}")
     manifest_rules = (
         _manifest_rules_by_key(lint, audit)
         if any(row["Channel"] == "MF" for row in mappings) else {}
@@ -2865,13 +2869,14 @@ def check_detector_mapping_b6(
                 "authorized register state"
             )
             continue
-        survival_description = survival_row.get("Error Description", "")
+        survival_description = detector_mapping.unescape_cell(
+            survival_row.get("Error Description", ""))
         for key in sorted(keys):
-            stamp = ac_stamps.get(key)
+            stamp = candidate_stamps.get(key)
             if stamp is not None and stamp not in survival_description:
                 lint.fail(
-                    f"{survival_path}: AC-mapped Error ID {eid} stripped the complete "
-                    f"machine-written stamp for witness {key[2]}"
+                    f"{survival_path}: {key[0]}-mapped Error ID {eid} stripped the "
+                    f"complete machine-written stamp for witness {key[2]}"
                 )
         allowed_records = set(list_cell(ledger.get("Verification Record IDs", "")))
         for key in sorted(keys):
@@ -3370,7 +3375,7 @@ def _validate_code_adjudication_shard(
         lint, shard, text, WITNESS_OUTCOME_COLS, "witness outcomes", required=True)
     records = []
     records += tables_by_cols(
-        lint, shard, text, MF_VERIFICATION_COLS, "MF verification records")
+        lint, shard, text, MF_VERIFICATION_COLS, "MF/PD verification records")
     records += tables_by_cols(
         lint, shard, text, PROBE_VERIFICATION_COLS, "DU/CV verification records")
     outcome_by_key, record_by_id = {}, {}
@@ -3405,7 +3410,10 @@ def _validate_code_adjudication_shard(
         else:
             record_by_id[record_id] = record
         channel = record["Channel"]
-        if (channel == "MF") != ("File Digest (sha256)" in record):
+        # A PD dismissal attests the resolved target's existence, path, and
+        # digest -- exactly the MF record shape.  The runnable-probe duty
+        # stays DU/CV-only.
+        if (channel in DIGEST_RECORD_CHANNELS) != ("File Digest (sha256)" in record):
             lint.fail(f"{shard}: verification record {record_id} uses the wrong channel-typed schema")
         key = tuple(record[field] for field in ("Channel", "Source ID", "Witness ID"))
         if key not in mapping_by_key:

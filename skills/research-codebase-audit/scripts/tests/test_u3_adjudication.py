@@ -29,6 +29,8 @@ DU_SOURCE = "DU-aaaaaaaaaaaa"
 DU_WITNESS = "DUW-111111111111"
 MF_SOURCE = "MF-bbbbbbbbbbbb"
 MF_WITNESS = "MFW-222222222222"
+PD_SOURCE = "PD-001"
+PD_WITNESS = "line:6"
 
 
 def _cli(root, command, *args):
@@ -40,16 +42,18 @@ def _cli(root, command, *args):
 
 def _mapping(channel="DU", *, eid="E-7000", anchor="do/probe.do:1",
              source=None, witness=None):
-    source = source or (DU_SOURCE if channel == "DU" else MF_SOURCE)
-    witness = witness or (DU_WITNESS if channel == "DU" else MF_WITNESS)
+    defaults = {"DU": (DU_SOURCE, DU_WITNESS), "PD": (PD_SOURCE, PD_WITNESS)}
+    default_source, default_witness = defaults.get(channel,
+                                                   (MF_SOURCE, MF_WITNESS))
+    source = source or default_source
+    witness = witness or default_witness
     row = {
         "Channel": channel, "Source ID": source, "Witness ID": witness,
         "Error ID": eid, "Mapping Kind": "new_candidate", "Site Anchor": anchor,
     }
     return dm.render_mapping(
         "E-7000–E-7099",
-        {"DU": [row] if channel == "DU" else [],
-         "MF": [row] if channel == "MF" else []},
+        {name: ([row] if channel == name else []) for name in dm.CHANNELS},
     ), row
 
 
@@ -75,8 +79,8 @@ def _probe_record(source=DU_SOURCE, witness=DU_WITNESS, record_id="VR-0001",
 
 
 def _mf_record(path, source=MF_SOURCE, witness=MF_WITNESS,
-               record_id="VR-0001"):
-    return ["MF", record_id, source, witness,
+               record_id="VR-0001", channel="MF"):
+    return [channel, record_id, source, witness,
             hashlib.sha256(path.read_bytes()).hexdigest(), "micromamba",
             "pinned", "micromamba env create --offline", "accepted", "yes"]
 
@@ -88,12 +92,14 @@ def _case(tmp_path, *, channel="DU", verdict="confirmed_error",
     root = tmp_path / "package"
     root.mkdir()
     a = rb.AuditDir(root)
-    anchor = anchor or ("do/probe.do:1" if channel == "DU" else "environment.yml:1")
+    anchor = anchor or {"DU": "do/probe.do:1", "PD": "py/pack_out.py:6"}.get(
+        channel, "environment.yml:1")
     mapping_text, mapping = _mapping(channel, eid=eid, anchor=anchor)
     a.write("_run/detector_mapping.md", mapping_text)
     source, witness = mapping["Source ID"], mapping["Witness ID"]
-    etype = ("sample_filter_or_flag_error" if channel == "DU"
-             else "version_or_dependency_error")
+    etype = {"DU": "sample_filter_or_flag_error",
+             "PD": "stale_or_wrong_path"}.get(channel,
+                                              "version_or_dependency_error")
     path = root / anchor.rsplit(":", 1)[0]
     path.parent.mkdir(parents=True, exist_ok=True)
     if channel == "DU":
@@ -136,8 +142,10 @@ def _case(tmp_path, *, channel="DU", verdict="confirmed_error",
         ))
     mf_records, probe_records = [], []
     if verdict == "not_error" and records:
-        if channel == "MF":
-            mf_records.append(_mf_record(path, source, witness))
+        # MF and PD dismissals are existence/identity attestations and use the
+        # digest-typed schema; DU/CV owe a runnable probe instead.
+        if channel in ("MF", "PD"):
+            mf_records.append(_mf_record(path, source, witness, channel=channel))
         else:
             probe_records.append(_probe_record(source, witness))
     shard = a.write("_code_error_recheck/k1.md", _shard_text(
@@ -538,6 +546,7 @@ def test_b3d_emission_converse_refuses_staging_corruption(tmp_path, kind):
             "# Manifest\n\nNo candidate findings: every recognized manifest parsed clean.\n"
             "No standard MF rows: no manifest candidates were emitted.\n")
     rb.emit_argument_contracts(a)
+    rb.emit_path_derivations(a)
     a.write("_run/detector_mapping_decisions.md",
             "Declared detector Error-ID range: E-7000–E-7099\n\n"
             + rb.md_table(dm.DECISION_COLS, []))
@@ -660,6 +669,7 @@ def test_tier1_b3d_converse_check_has_teeth(tmp_path, monkeypatch):
             "# Manifest\n\nNo candidate findings: every recognized manifest parsed clean.\n"
             "No standard MF rows: no manifest candidates were emitted.\n")
     rb.emit_argument_contracts(a)
+    rb.emit_path_derivations(a)
     a.write("_run/detector_mapping_decisions.md",
             "Declared detector Error-ID range: E-7000–E-7099\n\n"
             + rb.md_table(dm.DECISION_COLS, []))
@@ -671,7 +681,7 @@ def test_tier1_b3d_converse_check_has_teeth(tmp_path, monkeypatch):
         dm.validate_inputs(root, a.audit)
     monkeypatch.setattr(dm, "_validate_staging_converse", lambda *_args: None)
     _display, rows = dm.validate_inputs(root, a.audit)
-    assert rows == {"DU": [], "MF": [], "CV": [], "AC": []}
+    assert rows == {channel: [] for channel in dm.CHANNELS}
 
 
 def _completed_b3d_b6_run(tmp_path, verdict="not_error"):
@@ -691,6 +701,7 @@ def _completed_b3d_b6_run(tmp_path, verdict="not_error"):
     assert rb.run_script("check_manifests.py", root,
                          "--audit-dir", a.audit).returncode == 0
     rb.emit_argument_contracts(a)
+    rb.emit_path_derivations(a)
     sources = dm.parse_raw_sources(a.audit)
     source = next(iter(sources["DU"]))
     witness = sources["DU"][source][0]["witness_id"]

@@ -61,7 +61,7 @@ def _mapping_row(channel, source_id, witness_id, error_id, anchor):
 
 
 def _write_mapping(a, rows):
-    by_channel = {"DU": [], "MF": [], "CV": [], "AC": []}
+    by_channel = {channel: [] for channel in dm.CHANNELS}
     for row in rows:
         by_channel[row["Channel"]].append(row)
     a.write("_run/detector_mapping.md", dm.render_mapping(
@@ -69,7 +69,8 @@ def _write_mapping(a, rows):
 
 
 def _minimal_b6_case(tmp_path, *, channel, source_id, witness_id, verdict,
-                     accepted, rule=None, stamp=None, severity="2"):
+                     accepted, rule=None, stamp=None, severity="2",
+                     pd_statement='open("../out.txt")'):
     root = tmp_path / "package"
     root.mkdir()
     (root / "source.py").write_text("value = 1\n", encoding="utf-8")
@@ -77,14 +78,22 @@ def _minimal_b6_case(tmp_path, *, channel, source_id, witness_id, verdict,
         "name: empty\nprefix: /tmp/example\n", encoding="utf-8")
     a = rb.AuditDir(root)
     a.write("_run/definition_use_bundles.md", rb.definition_use_artifact([]))
+    rb.emit_path_derivations(a)
     error_id = "E-7000"
-    anchor = (
-        "source.py:1@call=0" if channel == "AC" else "environment.yml:2")
+    anchor = {"AC": "source.py:1@call=0", "PD": "source.py:2"}.get(
+        channel, "environment.yml:2")
     mapping = _mapping_row(channel, source_id, witness_id, error_id, anchor)
     _write_mapping(a, [mapping])
     if channel == "AC":
         artifact = _ac_artifact(source_id, (witness_id,))
         a.write("_run/argument_contracts.md", ac.render(artifact))
+    if channel == "PD":
+        # The stamp binding reads every raw detector artifact, so the AC one
+        # has to exist even when the mapped channel is PD.
+        a.write("_run/argument_contracts.md",
+                ac.render(ac.Artifact("a" * 64, (), ())))
+        a.write("_run/path_derivation_bundles.md", rb.path_derivation_artifact(
+            "source.py", [(2, "path literal", pd_statement, "no_known_caller")]))
     if channel == "MF":
         a.write(
             "_run/manifest_check.md",
@@ -166,6 +175,7 @@ def test_p26_builder_stamps_every_argument_contract_witness(tmp_path):
     artifact = _ac_artifact(source_id, ("argpos:2", "argpos:3"))
     a.write("_run/argument_contracts.md", ac.render(artifact))
     a.write("_run/definition_use_bundles.md", rb.definition_use_artifact([]))
+    rb.emit_path_derivations(a)
     a.write(
         "_run/manifest_check.md",
         "# Manifest parseability check\n\n"
@@ -249,7 +259,7 @@ def test_tier1_p26_survival_test_oracle_notices_disabled_binding(
 
     negative_oracle()
     monkeypatch.setattr(
-        lintmod.detector_mapping, "expected_ac_stamps",
+        lintmod.detector_mapping, "expected_candidate_stamps",
         lambda *_args, **_kwargs: {},
     )
     with pytest.raises(AssertionError):
@@ -262,6 +272,7 @@ def test_tier1_p26_post_b6a_strip_fails_b6b_and_verify_run_clis(tmp_path):
     artifact = _ac_artifact(source_id, (witness_id,))
     a.write("_run/argument_contracts.md", ac.render(artifact))
     a.write("_run/definition_use_bundles.md", rb.definition_use_artifact([]))
+    rb.emit_path_derivations(a)
     a.write(
         "_run/manifest_check.md",
         "# Manifest parseability check\n\n"
@@ -394,7 +405,7 @@ def test_second_read_plan_accepts_sectioned_detector_mapping_forms(
     root, a = u6read.detector_chain(tmp_path)
     _declared, _display, existing = dm.load_mapping(
         a.audit / "_run/detector_mapping.md")
-    channels = {"DU": [], "MF": [], "CV": [], "AC": []}
+    channels = {channel: [] for channel in dm.CHANNELS}
     if form != "zero":
         channels[existing[0]["Channel"]].append(existing[0])
     if form == "multi":
@@ -1115,6 +1126,7 @@ def _complete_stage_era_tail(tmp_path, ruling="cap", through_b8=True):
         ac.render(_ac_artifact(ac_source, (ac_witness,))),
     )
     a.write("_run/definition_use_bundles.md", rb.definition_use_artifact([]))
+    rb.emit_path_derivations(a)
     a.write(
         "_run/manifest_check.md",
         "# Manifest parseability check\n\n"

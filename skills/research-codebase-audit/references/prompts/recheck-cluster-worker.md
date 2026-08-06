@@ -168,8 +168,10 @@ full Channel/Source ID/Witness ID tuple. `Mech Relation` is closed by register c
 use only `never_fires`, `overwrites`, `wrong_target`, `stale_reference`, `omits`, `adds`,
 `wrong_value`, `mismatches`, `matches`, or `unresolved` (claims use the same list; outputs use
 `maps_to`, `matches`, or `unresolved`). Percent-escape reserved characters; never emit canonical
-mechanism bytes or `MIXED`. Under `### Verification records`, write the exact MF or DU/CV
-channel-typed table. Persist every DU/CV dismissal probe beside the shard and name it in
+mechanism bytes or `MIXED`. Under `### Verification records`, write the exact MF/PD or DU/CV
+channel-typed table — a PD dismissal uses the MF-typed digest schema, attesting the resolved
+target's existence, path, and digest, and owes no runnable probe.
+Persist every DU/CV dismissal probe beside the shard and name it in
 `Harness / Input Domain`. A probe must be a single self-contained file — all synthetic inputs
 inline, reading no other file and no package data — because the verifier re-runs exactly that
 one file hermetically. A verification record is a claim, not a receipt: never fabricate or
