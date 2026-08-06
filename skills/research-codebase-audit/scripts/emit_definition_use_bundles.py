@@ -39,6 +39,18 @@ REPLACE_TARGET_RE = re.compile(
 CONSTANT_RE = re.compile(
     r"(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)|\.|\"[^\"]*\"|'[^']*')\s*$"
 )
+LOOP_HEAD_RE = re.compile(
+    r"^(?:(?:capture|cap|quietly|qui)\s*:?[ \t]*)*"
+    r"(?P<command>foreach|forv(?:a(?:l(?:u(?:e(?:s)?)?)?)?)?|while)\b",
+    re.IGNORECASE,
+)
+NARROWING_QUESTION = (
+    "Does the added guard conjunct narrow cases the producer defines as "
+    "covered, or is it an independently justified restriction?"
+)
+OVERWRITE_QUESTION = (
+    "Can a later write erase an earlier assignment that should persist?"
+)
 
 
 def short_hash(identity):
@@ -217,6 +229,100 @@ def _consumer_kind(code):
     return None, None
 
 
+def _brace_events(code):
+    """Yield ``{``/``}`` occurrences that sit outside quoted strings."""
+    events, quote = [], None
+    for char in code:
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char == '"':
+            quote = char
+        elif char in "{}":
+            events.append(char)
+    return events
+
+
+def _loop_command(code):
+    """Return the canonical loop command opening this statement, or None.
+
+    Stata's legal abbreviations of ``forvalues`` (down to ``forv``) all report
+    the canonical spelling, so the rendered loop-context vocabulary stays
+    exactly ``foreach``/``forvalues``/``while``.  The trailing word boundary
+    keeps an unrelated command that merely starts with ``forv`` out.
+    """
+    match = LOOP_HEAD_RE.match(code)
+    if not match:
+        return None
+    command = match.group("command").lower()
+    return "forvalues" if command.startswith("forv") else command
+
+
+def _loop_labels(logical):
+    """Return, per logical line, the innermost enclosing loop command or None.
+
+    A labeled frame stack: an opening brace on a ``foreach``/``forvalues``/
+    ``while`` line pushes a loop frame, any other opener pushes a non-loop
+    frame, and a closing brace pops.  Depth alone never marks a line as looped,
+    so ``if { ... }`` blocks cannot false-fire and quoted or commented braces
+    cannot desynchronize the stack.
+    """
+    labels, stack = [], []
+    for statement in logical:
+        code = statement["code"]
+        labels.append(next((frame for frame in reversed(stack) if frame), None))
+        if code.startswith("*"):
+            continue
+        label = _loop_command(code)
+        for event in _brace_events(code):
+            if event == "{":
+                stack.append(label)
+            elif stack:
+                stack.pop()
+    return labels
+
+
+def _group_lifetime(logical, def_index, var):
+    """Return the exclusive end index of a producer group's lifetime.
+
+    A group ends at the next ``gen`` of the same variable; a re-created
+    variable starts a new group.
+    """
+    for index in range(def_index + 1, len(logical)):
+        match = GEN_RE.match(logical[index]["code"])
+        if match and match.group("var").lower() == var.lower():
+            return index
+    return len(logical)
+
+
+def _group_members(logical, loop_labels, def_index, end_index, var):
+    """Collect a producer group's member ``replace`` write sites, in line order."""
+    members = []
+    for index in range(def_index + 1, end_index):
+        statement = logical[index]
+        match = REPLACE_TARGET_RE.match(statement["code"])
+        if not match or match.group("var").lower() != var.lower():
+            continue
+        members.append({
+            "line": statement["line"],
+            "raw": statement["raw"],
+            "guard": _if_guard(statement["code"]),
+            "loop": loop_labels[index],
+        })
+    return members
+
+
+def _loop_triggered(member):
+    """True when a member write site sits inside a loop-labeled frame."""
+    return member["loop"] is not None
+
+
+def _sequence_triggered(member, position):
+    """True when an unfiltered member write follows another member write."""
+    return position > 0 and member["guard"] is None
+
+
 def _context(raw_lines, def_line, consumer_line):
     indexes = set()
     for center, radius in ((def_line, 5), (consumer_line, 2)):
@@ -228,9 +334,22 @@ def _context(raw_lines, def_line, consumer_line):
     )
 
 
+def _overwrite_context(raw_lines, def_line, members):
+    """Definition-site window plus every member write site with its loop context."""
+    parts = [
+        f"L{i}: {raw_lines[i - 1].strip()}"
+        for i in range(max(1, def_line - 5), min(len(raw_lines), def_line + 5) + 1)
+        if raw_lines[i - 1].strip()
+    ]
+    parts += [f"L{member['line']} [loop: {member['loop'] or 'none'}]: {member['raw']}"
+              for member in members]
+    return " / ".join(parts)
+
+
 def _scan_file(root, path):
     raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     logical = _logical_lines(raw_lines)
+    loop_labels = _loop_labels(logical)
     rel = path.relative_to(root).as_posix()
     producers = []
     for index, statement in enumerate(logical):
@@ -239,24 +358,53 @@ def _scan_file(root, path):
             continue
         var, rhs = match.group("var"), match.group("rhs")
         rhs = re.split(r"\s+if\s+", rhs, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-        shape = None
         if BOOLEAN_RHS_RE.search(rhs):
-            shape = "boolean_gen"
+            # The boolean_gen path is unchanged: EOF-bounded consumer scan.
+            producers.append({"index": index, "var": var, "shape": "boolean_gen",
+                              "definition": statement, "end": len(logical),
+                              "members": []})
         elif CONSTANT_RE.fullmatch(rhs):
-            later = logical[index + 1:]
-            if any((m := REPLACE_TARGET_RE.match(item["code"]))
-                   and m.group("var").lower() == var.lower()
-                   and _if_guard(item["code"]) is not None
-                   for item in later):
-                shape = "constant_then_replace"
-        if shape:
-            producers.append((index, var, shape, statement))
+            end = _group_lifetime(logical, index, var)
+            members = _group_members(logical, loop_labels, index, end, var)
+            if members:
+                producers.append({"index": index, "var": var,
+                                  "shape": "producer_group",
+                                  "definition": statement, "end": end,
+                                  "members": members})
 
     bundles = []
-    for def_index, var, shape, definition in producers:
+    for producer in producers:
+        def_index, var = producer["index"], producer["var"]
+        shape, definition = producer["shape"], producer["definition"]
         token = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(var)}(?![A-Za-z0-9_])",
                            re.IGNORECASE)
-        for consumer in logical[def_index + 1:]:
+        if producer["members"]:
+            members = producer["members"]
+            triggering = [member for position, member in enumerate(members)
+                          if _loop_triggered(member)
+                          or _sequence_triggered(member, position)]
+            if triggering:
+                anchor = triggering[0]
+                identity = (rel, definition["line"], var, "overwrite")
+                write_lines = ";".join(
+                    str(line) for line in sorted(m["line"] for m in members))
+                bundles.append({
+                    "identity": identity,
+                    "witness_identity": identity + (write_lines,),
+                    "kind": "overwrite",
+                    "file": rel,
+                    "variable": var,
+                    "producer_shape": shape,
+                    "definition_line": definition["line"],
+                    "definition": definition["raw"],
+                    "consumer_line": anchor["line"],
+                    "consumer": anchor["raw"],
+                    "guard": anchor["guard"] or "—",
+                    "context": _overwrite_context(raw_lines, definition["line"],
+                                                  members),
+                    "category": "standard",
+                })
+        for consumer in logical[def_index + 1:producer["end"]]:
             category, command = _consumer_kind(consumer["code"])
             if category is None:
                 continue
@@ -273,6 +421,8 @@ def _scan_file(root, path):
             identity = (rel, definition["line"], consumer["line"], var)
             bundles.append({
                 "identity": identity,
+                "witness_identity": identity + (guard,),
+                "kind": "narrowing",
                 "file": rel,
                 "variable": var,
                 "producer_shape": shape,
@@ -315,7 +465,7 @@ def scan_package(root):
             )
         seen[digest] = bundle["identity"]
         bundle["id"] = f"DU-{digest}"
-        witness_identity = bundle["identity"] + (bundle["guard"],)
+        witness_identity = bundle["witness_identity"]
         witness_digest = short_hash(witness_identity)
         prior_witness = seen_witnesses.get(witness_digest)
         if prior_witness is not None and prior_witness != witness_identity:
@@ -349,10 +499,14 @@ def _render_table(lines, rows, empty_line):
         lines += [f"| {empty_line} | " + " | ".join([""] * 10) + " | |"]
         return
     for b in rows:
-        identity = (f"({_cell(b['file'])}, {b['definition_line']}, "
-                    f"{b['consumer_line']}, {_cell(b['variable'])})")
-        question = ("Does the added guard conjunct narrow cases the producer "
-                    "defines as covered, or is it an independently justified restriction?")
+        if b["kind"] == "overwrite":
+            identity = (f"({_cell(b['file'])}, {b['definition_line']}, "
+                        f"{_cell(b['variable'])}, overwrite)")
+            question = OVERWRITE_QUESTION
+        else:
+            identity = (f"({_cell(b['file'])}, {b['definition_line']}, "
+                        f"{b['consumer_line']}, {_cell(b['variable'])})")
+            question = NARROWING_QUESTION
         cells = [f"`{b['id']}`", f"`{b['witness_id']}`", f"`{identity}`", b["variable"],
                  b["producer_shape"], f"`{b['file']}:{b['definition_line']}`",
                  f"`{_cell(b['definition'])}`",
@@ -365,7 +519,8 @@ def _render_table(lines, rows, empty_line):
 def render_artifact(results):
     standard = [b for b in results["bundles"] if b["category"] == "standard"]
     advisory = [b for b in results["bundles"] if b["category"] == "advisory"]
-    producer_groups = {(b["file"], b["variable"]) for b in standard}
+    producer_groups = {(b["file"], b["definition_line"], b["variable"])
+                       for b in standard}
     lines = [
         "# Stata definition/use bundles", "",
         "Generated by `scripts/emit_definition_use_bundles.py` at b3d. This is a mechanical",
@@ -374,7 +529,8 @@ def render_artifact(results):
         "advisory and excluded from mandatory mapping.", "",
         "## Scan summary", "",
         f"- Stata files scanned: {len(results['files'])}",
-        f"- Standard producer groups (file + variable): {len(producer_groups)}",
+        f"- Standard producer groups (file + gen line + variable): "
+        f"{len(producer_groups)}",
         f"- Standard candidates: {len(standard)}",
         f"- Advisory candidates: {len(advisory)}", "",
         "## Files scanned", "",

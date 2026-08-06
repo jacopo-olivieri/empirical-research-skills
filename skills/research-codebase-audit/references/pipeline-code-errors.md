@@ -74,7 +74,9 @@ claims artifact exists; any conventions, CV scan, or CV decision is refused.
    `emit_definition_use_bundles.py <package_root> --audit-dir audit`,
    `check_manifests.py <package_root> --audit-dir audit`, and
    `check_argument_contracts.py <package_root> --audit-dir audit`; all three deterministic artifacts are
-   required even when their standard-row count is zero.
+   required even when their standard-row count is zero. The definition/use artifact carries two
+   standard bundle kinds — guard-narrowing bundles and producer-group overwrite bundles — and both
+   are mapping-mandatory.
 2. In replication mode, if `conventions.md` has rows, dispatch one
    `prompts/conventions-scan-worker.md` worker (role: `b3d_conventions_scan`) after the detectors
    and before decisions. It writes only `audit/_run/cv_scan.md`; completion requires the parser

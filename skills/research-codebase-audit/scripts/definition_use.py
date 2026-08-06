@@ -143,7 +143,7 @@ def _bundle_rows(section, label):
 def parse_artifact(text):
     """Parse the complete emitted definition/use artifact."""
     files_scanned = _count(text, "Stata files scanned")
-    producer_groups = _count(text, "Standard producer groups (file + variable)")
+    producer_groups = _count(text, "Standard producer groups (file + gen line + variable)")
     standard_count = _count(text, "Standard candidates")
     advisory_count = _count(text, "Advisory candidates")
     standard_rows = _bundle_rows(_section(text, "Candidate findings"), "standard")

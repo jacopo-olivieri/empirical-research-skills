@@ -35,3 +35,6 @@ def pytest_configure(config):
         "markers", "u8: unit U8 — severity and argument contracts")
     config.addinivalue_line(
         "markers", "u9: unit U9 — acceptance campaign contracts")
+    config.addinivalue_line(
+        "markers", "u11: unit U11 — Stata analysis extensions (DU producer "
+        "groups, AC macro-fronted interpreters)")
