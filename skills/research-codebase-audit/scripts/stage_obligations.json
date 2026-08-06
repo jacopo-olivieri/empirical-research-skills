@@ -77,6 +77,7 @@
     {"type": "artifact", "pattern": "_run/definition_use_bundles.md"},
     {"type": "artifact", "pattern": "_run/manifest_check.md"},
     {"type": "artifact", "pattern": "_run/argument_contracts.md"},
+    {"type": "artifact", "pattern": "_run/path_derivation_bundles.md"},
     {"type": "artifact", "pattern": "_run/detector_mapping.md"},
     {"type": "validate", "validator": "detector:mapping"}
   ],

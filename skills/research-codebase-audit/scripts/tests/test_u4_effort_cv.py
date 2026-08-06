@@ -75,6 +75,7 @@ def _base_tree(tmp_path, *, name="package", mode="replication", initialize=False
     assert du.returncode == 0, du.stdout + du.stderr
     assert mf.returncode == 0, mf.stdout + mf.stderr
     rb.emit_argument_contracts(a)
+    rb.emit_path_derivations(a)
     return root, a
 
 

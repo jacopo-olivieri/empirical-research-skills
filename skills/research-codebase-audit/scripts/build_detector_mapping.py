@@ -14,6 +14,7 @@ import check_manifests as mf
 import check_argument_contracts as ac
 import cv_scan
 import definition_use as du
+import emit_path_derivation_bundles as pd
 
 
 MAPPING_COLS = [
@@ -24,12 +25,19 @@ DECISION_COLS = ["Channel", "Source ID", "Error ID", "Mapping Kind"]
 MAPPING_KINDS = {"new_candidate", "existing_row", "reviewed_not_divergent"}
 MARKERS = [
     "<!-- GENERATED:DU -->", "<!-- GENERATED:MF -->", "<!-- CONDUCTOR:CV -->",
-    "<!-- GENERATED:AC -->",
+    "<!-- GENERATED:AC -->", "<!-- GENERATED:PD -->",
 ]
+CHANNELS = ("DU", "MF", "CV", "AC", "PD")
+# Channels whose raw source carries a ``witnesses`` list under a dict, as
+# opposed to the bare witness list DU/MF use.
+WITNESS_DICT_CHANNELS = {"CV", "AC", "PD"}
+# Channels whose candidate rows carry machine-written register stamps.
+STAMP_CHANNELS = ("AC", "PD")
 DU_ZERO = "No standard DU rows: the definition/use detector emitted zero standard candidates."
 MF_ZERO = "No standard MF rows: the manifest detector emitted zero standard candidates."
 CV_ZERO = "No channel-mapped CV rows: no conventions were consolidated for this run."
 AC_ZERO = "No channel-mapped AC rows: the argument-contract checker emitted zero findings."
+PD_ZERO = "No channel-mapped PD rows: the path-derivation sweep emitted zero candidates."
 RANGE_RE = re.compile(r"^Declared detector Error-ID range:\s*(E-\d{4})[–-](E-\d{4})\s*$", re.M)
 ERROR_COLS = [
     "Error ID", "Error Type", "Code/Data Source", "Code Location", "Status",
@@ -47,6 +55,22 @@ class MappingError(RuntimeError):
 
 def _norm(value):
     return str(value).strip().strip("`").strip()
+
+
+def unescape_cell(value):
+    """Turn a Markdown register cell back into its plain text."""
+    return str(value).replace("\\|", "|")
+
+
+def escape_cell(value):
+    """Escape a plain string for a Markdown cell, idempotently.
+
+    Detector stamps carry arbitrary audited-source text -- a PD statement can
+    hold a `|` from an ordinary boolean-or expression -- so the cell must be
+    re-escaped when a stamped row is rewritten.  Collapsing first makes the
+    recipe idempotent, so re-stamping an already-escaped row is a no-op.
+    """
+    return str(value).replace("\\|", "|").replace("|", "\\|")
 
 
 def argument_contract_stamp(finding_kind, witness_id, caller_path, callee_path,
@@ -68,6 +92,43 @@ def argument_contract_stamp(finding_kind, witness_id, caller_path, callee_path,
         f"`{witness_id}` at `{site_anchor}`: callee `{callee_path}` and "
         f"caller `{caller_path}` disagree about argument position "
         f"{argument_position}."
+    )
+
+
+def path_derivation_stamp(kind, witness_id, file, line, idiom, check, statement,
+                          machine, reason):
+    """Return the machine-written register sentence for one PD witness.
+
+    Fixed template over artifact fields only.  A ``failed`` witness carries the
+    machine numbers that prove the failure; an ``unchecked`` witness carries
+    its line, that line's statement, the closed-vocabulary reason, and the
+    per-line verdict duty the recheck owes.
+    """
+    if kind == "failed":
+        return (
+            f"Path-derivation finding `failed` for witness `{witness_id}` at "
+            f"`{file}:{line}`: idiom `{idiom}` under check {check} with "
+            f"machine numbers {machine}."
+        )
+    return (
+        f"Path-derivation finding `unchecked` for witness `{witness_id}` at "
+        f"`{file}:{line}`: statement `{statement}` is unchecked (reason "
+        f"`{reason}`); the recheck must give a verdict for this line."
+    )
+
+
+def _stamp_for(channel, source, witness):
+    """Return the machine-written stamp for one witness of a stamped channel."""
+    if channel == "AC":
+        return argument_contract_stamp(
+            witness["finding_kind"], witness["witness_id"], source["caller"],
+            witness["callee_path"], witness["argument_position"],
+            witness["anchor"],
+        )
+    return path_derivation_stamp(
+        source["kind"], witness["witness_id"], source["file"], witness["line"],
+        witness["idiom"], witness["check"], witness["statement"],
+        witness["machine"], witness["reason"],
     )
 
 
@@ -110,14 +171,15 @@ def parse_raw_sources(audit):
     du_path = audit / "_run" / "definition_use_bundles.md"
     mf_path = audit / "_run" / "manifest_check.md"
     ac_path = audit / "_run" / "argument_contracts.md"
-    for path in (du_path, mf_path, ac_path):
+    pd_path = audit / "_run" / "path_derivation_bundles.md"
+    for path in (du_path, mf_path, ac_path, pd_path):
         if not path.is_file():
             raise MappingError(f"missing raw detector artifact: {path}")
     try:
         du_artifact = du.parse_artifact(du_path.read_text(encoding="utf-8"))
     except du.DefinitionUseFormatError as exc:
         raise MappingError(f"{du_path}: {exc}") from exc
-    sources = {"DU": {}, "MF": {}, "AC": {}}
+    sources = {"DU": {}, "MF": {}, "AC": {}, "PD": {}}
     for row in du_artifact.standard_rows:
         source_id = row["Bundle ID"]
         witness_id = row["Witness ID"]
@@ -196,7 +258,38 @@ def parse_raw_sources(audit):
             "argument_position": finding.argument_position,
             "callee_path": finding.callee_path,
         })
+
+    try:
+        pd_artifact = pd.parse_artifact(pd_path.read_text(encoding="utf-8"))
+    except pd.PathDerivationError as exc:
+        raise MappingError(f"{pd_path}: {exc}") from exc
+    for source in pd_artifact.sources:
+        sources["PD"][source.source_id] = {
+            "kind": source.kind,
+            "file": source.file,
+            "witnesses": [{
+                "witness_id": witness.witness_id,
+                "anchor": f"{source.file}:{witness.line}",
+                "line": witness.line,
+                "idiom": witness.idiom,
+                "check": witness.check,
+                "statement": witness.statement,
+                "machine": witness.machine,
+                "reason": witness.reason,
+            } for witness in source.witnesses],
+        }
     return sources
+
+
+def path_derivation_seed(audit):
+    """Return the validated seed record the PD artifact header pins."""
+    path = Path(audit) / "_run" / "path_derivation_bundles.md"
+    if not path.is_file():
+        raise MappingError(f"missing raw detector artifact: {path}")
+    try:
+        return pd.parse_artifact(path.read_text(encoding="utf-8")).seed
+    except pd.PathDerivationError as exc:
+        raise MappingError(f"{path}: {exc}") from exc
 
 
 def parse_decisions(path):
@@ -209,16 +302,19 @@ def parse_decisions(path):
     for row in rows:
         channel, source_id = row["Channel"], row["Source ID"]
         key = (channel, source_id)
-        if channel not in {"DU", "MF", "CV", "AC"}:
+        if channel not in set(CHANNELS):
             raise MappingError(f"decision names unsupported channel {channel}")
         if key in decisions:
             raise MappingError(f"duplicate decision for {source_id}")
         if row["Mapping Kind"] not in MAPPING_KINDS:
             raise MappingError(f"decision for {source_id} has invalid Mapping Kind {row['Mapping Kind']}")
         kind = row["Mapping Kind"]
-        if channel == "AC" and kind != "new_candidate":
+        # Stamped channels write machine sentences into staged rows, and the
+        # staging-converse freeze forbids mutating a pre-existing row, so a
+        # stamped decision is always a new candidate.
+        if channel in STAMP_CHANNELS and kind != "new_candidate":
             raise MappingError(
-                f"AC decision for {source_id} must use Mapping Kind new_candidate"
+                f"{channel} decision for {source_id} must use Mapping Kind new_candidate"
             )
         if kind == "reviewed_not_divergent":
             if channel != "CV":
@@ -404,7 +500,7 @@ def _expected_rows(sources, decisions, declared, register, snapshot,
         raise MappingError(f"decision names unknown detector source {source_id}")
     for channel, source_id in sorted(source_keys - set(decisions)):
         raise MappingError(f"unmapped detector source {source_id}")
-    rows = {"DU": [], "MF": [], "CV": [], "AC": []}
+    rows = {channel: [] for channel in CHANNELS}
     for key in sorted(decisions):
         channel, source_id = key
         decision = decisions[key]
@@ -450,25 +546,34 @@ def _expected_rows(sources, decisions, declared, register, snapshot,
                     f"AC candidate {source_id} Code/Data Source omits "
                     + ", ".join(missing_paths)
                 )
-            description = target.get("Error Description", "")
+        if channel == "PD":
+            if target.get("Error Type") != "stale_or_wrong_path":
+                raise MappingError(
+                    f"PD candidate {source_id} maps to {error_id} with Error Type "
+                    f"{target.get('Error Type')!r}, expected stale_or_wrong_path"
+                )
+            cell = target.get("Code/Data Source", "")
+            if not re.search(
+                    rf"(?<![\w./-]){re.escape(source['file'])}(?=[:;,\s`]|$)", cell):
+                raise MappingError(
+                    f"PD candidate {source_id} Code/Data Source omits "
+                    f"{source['file']}"
+                )
+        if channel in STAMP_CHANNELS:
+            description = unescape_cell(target.get("Error Description", ""))
             missing_stamps = [
                 stamp
-                for stamp in (
-                    argument_contract_stamp(
-                        witness["finding_kind"], witness["witness_id"],
-                        source["caller"], witness["callee_path"],
-                        witness["argument_position"], witness["anchor"],
-                    )
-                    for witness in source["witnesses"]
-                )
+                for stamp in (_stamp_for(channel, source, witness)
+                              for witness in source["witnesses"])
                 if stamp not in description
             ]
             if missing_stamps:
                 raise MappingError(
-                    f"AC candidate {source_id} Error Description omits "
+                    f"{channel} candidate {source_id} Error Description omits "
                     f"{len(missing_stamps)} machine-written witness stamp(s)"
                 )
-        witnesses = source["witnesses"] if channel in {"CV", "AC"} else source
+        witnesses = (source["witnesses"] if channel in WITNESS_DICT_CHANNELS
+                     else source)
         for witness in witnesses:
             rows[channel].append({
                 "Channel": channel, "Source ID": source_id,
@@ -478,57 +583,50 @@ def _expected_rows(sources, decisions, declared, register, snapshot,
     return rows
 
 
-def expected_ac_stamps(audit, mappings):
-    """Map each AC mapping key to its complete artifact-derived stamp."""
-    sources = parse_raw_sources(Path(audit)).get("AC", {})
+def expected_candidate_stamps(audit, mappings):
+    """Map each stamped-channel mapping key to its artifact-derived stamp."""
+    raw = parse_raw_sources(Path(audit))
     stamps = {}
     for mapping in mappings:
-        if mapping.get("Channel") != "AC":
+        channel = mapping.get("Channel")
+        if channel not in STAMP_CHANNELS:
             continue
-        source = sources.get(mapping["Source ID"])
+        source = raw.get(channel, {}).get(mapping["Source ID"])
         if source is None:
             raise MappingError(
-                f"AC mapping names unknown raw source {mapping['Source ID']}")
+                f"{channel} mapping names unknown raw source "
+                f"{mapping['Source ID']}")
         matches = [
             witness for witness in source["witnesses"]
             if witness["witness_id"] == mapping["Witness ID"]
         ]
         if len(matches) != 1:
             raise MappingError(
-                f"AC mapping witness {mapping['Witness ID']} resolves to "
+                f"{channel} mapping witness {mapping['Witness ID']} resolves to "
                 f"{len(matches)} raw findings"
             )
-        witness = matches[0]
         stamps[(
             mapping["Channel"], mapping["Source ID"], mapping["Witness ID"],
-        )] = argument_contract_stamp(
-            witness["finding_kind"], witness["witness_id"], source["caller"],
-            witness["callee_path"], witness["argument_position"],
-            witness["anchor"],
-        )
+        )] = _stamp_for(channel, source, matches[0])
     return stamps
 
 
-def _stamp_ac_candidates(audit):
-    """Atomically append every AC witness stamp to its staged candidate row."""
+def _stamp_candidates(audit):
+    """Atomically append every stamped witness sentence to its staged row."""
     sources = parse_raw_sources(audit)
     _declared, _display, decisions = parse_decisions(
         audit / "_run/detector_mapping_decisions.md")
     stamps_by_error = {}
     for (channel, source_id), decision in decisions.items():
-        if channel != "AC":
+        if channel not in STAMP_CHANNELS:
             continue
-        source = sources["AC"].get(source_id)
+        source = sources[channel].get(source_id)
         if source is None:
-            raise MappingError(f"AC decision names unknown source {source_id}")
+            raise MappingError(
+                f"{channel} decision names unknown source {source_id}")
         for witness in source["witnesses"]:
             stamps_by_error.setdefault(decision["Error ID"], []).append(
-                argument_contract_stamp(
-                    witness["finding_kind"], witness["witness_id"],
-                    source["caller"], witness["callee_path"],
-                    witness["argument_position"], witness["anchor"],
-                )
-            )
+                _stamp_for(channel, source, witness))
     if not stamps_by_error:
         return
 
@@ -558,17 +656,23 @@ def _stamp_ac_candidates(audit):
             continue
         found.add(error_id)
         description_index = ERROR_COLS.index("Error Description")
-        description = cells[description_index].rstrip()
+        # Stamps are plain text (the raw artifact's cells are unescaped when
+        # parsed), so the membership test has to run against the plain form of
+        # the cell, and the cell has to be re-escaped when the row is rejoined.
+        description = unescape_cell(cells[description_index].rstrip())
         for stamp in stamps:
             if stamp not in description:
                 description = f"{description} {stamp}".strip()
                 changed = True
         cells[description_index] = description
-        lines[index] = "| " + " | ".join(cells) + " |" + newline
+        lines[index] = (
+            "| " + " | ".join(escape_cell(cell) for cell in cells) + " |"
+            + newline)
     missing = sorted(set(stamps_by_error) - found)
     if missing:
         raise MappingError(
-            f"AC stamp target row(s) absent from staged register: {', '.join(missing)}")
+            f"detector stamp target row(s) absent from staged register: "
+            f"{', '.join(missing)}")
     if not changed:
         return
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -599,6 +703,7 @@ def render_mapping(display_range, rows):
     lines += _render_section(MARKERS[1], rows["MF"], MF_ZERO)
     lines += _render_section(MARKERS[2], rows.get("CV", []), CV_ZERO)
     lines += _render_section(MARKERS[3], rows.get("AC", []), AC_ZERO)
+    lines += _render_section(MARKERS[4], rows.get("PD", []), PD_ZERO)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -612,8 +717,8 @@ def parse_mapping_text(text):
         raise MappingError("detector mapping markers are out of order")
     declared, display = _parse_range(text, "detector mapping")
     rows = []
-    zeros = (DU_ZERO, MF_ZERO, CV_ZERO, AC_ZERO)
-    channels = ("DU", "MF", "CV", "AC")
+    zeros = (DU_ZERO, MF_ZERO, CV_ZERO, AC_ZERO, PD_ZERO)
+    channels = CHANNELS
     for index, (marker, zero) in enumerate(zip(MARKERS, zeros)):
         start = positions[index] + len(marker)
         end = positions[index + 1] if index + 1 < len(positions) else len(text)
@@ -645,8 +750,11 @@ def parse_mapping_text(text):
                         "reviewed_not_divergent mapping rows are CV-only and require Error ID —"
                     )
             else:
-                if expected_channel == "AC" and row["Mapping Kind"] != "new_candidate":
-                    raise MappingError("AC mapping rows require Mapping Kind new_candidate")
+                if expected_channel in STAMP_CHANNELS \
+                        and row["Mapping Kind"] != "new_candidate":
+                    raise MappingError(
+                        f"{expected_channel} mapping rows require Mapping Kind "
+                        "new_candidate")
                 if not re.fullmatch(r"E-\d{4}", row["Error ID"]):
                     raise MappingError(f"{marker} contains invalid Error ID {row['Error ID']}")
             rows.append(row)
@@ -709,6 +817,14 @@ def _reproducibility_check(package_root, audit):
             ([sys.executable, str(Path(__file__).with_name("check_argument_contracts.py")),
               str(package_root), "--audit-dir", str(audit), "-o", str(temp / "argument_contracts.md")],
              audit / "_run/argument_contracts.md"),
+            # The one per-package-flagged entry: the PD sweep is replayed with
+            # exactly the seed the artifact header pins, so the re-run can
+            # never fall back to a default the conductor never recorded.
+            ([sys.executable, str(Path(__file__).with_name("emit_path_derivation_bundles.py")),
+              str(package_root), "--audit-dir", str(audit),
+              *path_derivation_seed(audit).flags(),
+              "-o", str(temp / "path_derivation_bundles.md")],
+             audit / "_run/path_derivation_bundles.md"),
         ]
         for command, recorded in commands:
             result = subprocess.run(command, cwd=package_root, capture_output=True, text=True)
@@ -723,7 +839,7 @@ def _reproducibility_check(package_root, audit):
 
 
 def emit(package_root, audit, output):
-    _stamp_ac_candidates(audit)
+    _stamp_candidates(audit)
     display, rows = validate_inputs(package_root, audit, check=False)
     payload = render_mapping(display, rows)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -742,7 +858,7 @@ def check(package_root, audit, output):
     declared, artifact_display, actual_rows = load_mapping(output)
     if artifact_display != display:
         raise MappingError("detector mapping declared range disagrees with decisions table")
-    expected_rows = expected["DU"] + expected["MF"] + expected["CV"] + expected["AC"]
+    expected_rows = [row for channel in CHANNELS for row in expected[channel]]
     key = lambda row: tuple(row[column] for column in MAPPING_COLS)
     if sorted(map(key, actual_rows)) != sorted(map(key, expected_rows)):
         raise MappingError("detector mapping rows do not exactly close the current detector decisions")
@@ -752,8 +868,12 @@ def check(package_root, audit, output):
     cv_expected = expected_text[expected_text.index(MARKERS[2]):expected_text.index(MARKERS[3])]
     if cv_actual != cv_expected:
         raise MappingError("emitted CV section differs byte-for-byte from frozen cv_scan inputs")
-    if actual_text[actual_text.index(MARKERS[3]):] != expected_text[expected_text.index(MARKERS[3]):]:
+    ac_actual = actual_text[actual_text.index(MARKERS[3]):actual_text.index(MARKERS[4])]
+    ac_expected = expected_text[expected_text.index(MARKERS[3]):expected_text.index(MARKERS[4])]
+    if ac_actual != ac_expected:
         raise MappingError("emitted AC section differs byte-for-byte from argument-contract inputs")
+    if actual_text[actual_text.index(MARKERS[4]):] != expected_text[expected_text.index(MARKERS[4]):]:
+        raise MappingError("emitted PD section differs byte-for-byte from path-derivation inputs")
     _reproducibility_check(package_root, audit)
 
 

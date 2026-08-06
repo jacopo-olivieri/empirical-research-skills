@@ -38,3 +38,5 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "u11: unit U11 — Stata analysis extensions (DU producer "
         "groups, AC macro-fronted interpreters)")
+    config.addinivalue_line(
+        "markers", "u12: unit U12 — the path/import idiom-closure channel")

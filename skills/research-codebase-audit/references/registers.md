@@ -820,8 +820,10 @@ Under `### Witness outcomes`, emit exactly the pre-boundary columns `Channel`, `
 `mismatches`, `matches`, or `unresolved`; outputs use `maps_to`, `matches`, or `unresolved`.
 Emit rows only for `confirmed_error`, `not_error`, and `duplicate`. Percent-escape reserved cell
 characters with `mechanism_schema.encode_cell`; never write canonical mechanism bytes or
-`MIXED`. Under `### Verification records`, use the MF or DU/CV channel-typed schema defined in
-the worker contract. A DU/CV dismissal names a runnable probe stored beside the shard.
+`MIXED`. Under `### Verification records`, use the MF/PD or DU/CV channel-typed schema defined in
+the worker contract — a PD dismissal attests the resolved target's existence, path, and digest, so
+it uses the MF-typed digest schema alongside MF. A DU/CV dismissal names a runnable probe stored
+beside the shard.
 
 Manifest adjudication severity guidance:
 

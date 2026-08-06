@@ -427,6 +427,7 @@ def _drill_tree(tmp_path, *, decide=True, initialize=False):
     assert rb.run_script("check_manifests.py", root,
                          "--audit-dir", a.audit).returncode == 0
     rb.emit_argument_contracts(a)
+    rb.emit_path_derivations(a)
     sources = dm.parse_raw_sources(a.audit)
     assert len(sources["DU"]) == 1, sources["DU"]
     source_id = next(iter(sources["DU"]))

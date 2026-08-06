@@ -67,6 +67,40 @@ def emit_argument_contracts(auditdir):
     return auditdir.audit / "_run/argument_contracts.md"
 
 
+_pd_mod = load_script("emit_path_derivation_bundles")
+
+
+def path_derivation_artifact(file, witnesses, *, parsed_files=("source.py",)):
+    """Render a PD raw artifact holding one unchecked group, source ``PD-001``.
+
+    ``witnesses`` is a sequence of ``(line, idiom, statement, reason)``.  The
+    renderer is the emitter's own, so this builder cannot drift from the
+    artifact the production CLI writes.
+    """
+    report = _pd_mod.Report(_pd_mod.SeedRecord((), True))
+    report.parsed_files = list(parsed_files)
+    report.groups = [{"file": file, "witnesses": [
+        {"line": line, "idiom": idiom, "statement": statement, "reason": reason}
+        for line, idiom, statement, reason in witnesses]}]
+    return _pd_mod.render_artifact(report)
+
+
+def emit_path_derivations(auditdir, *entries):
+    """Write the deterministic PD raw artifact for a synthetic tree.
+
+    With no ``--entry`` pairs the package documents no invocation, which is
+    the ordinary case for the synthetic trees the other units build.
+    """
+    seed = [flag for entry in entries for flag in ("--entry", entry)] \
+        or ["--no-documented-invocation"]
+    result = run_script(
+        "emit_path_derivation_bundles.py", auditdir.root,
+        "--audit-dir", auditdir.audit, *seed,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return auditdir.audit / "_run/path_derivation_bundles.md"
+
+
 # --------------------------------------------------------------- md builders
 
 
@@ -376,6 +410,7 @@ def detector_mapping_artifact(mappings=()):
     mf_rows = [row for row in rows if row[0] == "MF"]
     cv_rows = [row for row in rows if row[0] == "CV"]
     ac_rows = [row for row in rows if row[0] == "AC"]
+    pd_rows = [row for row in rows if row[0] == "PD"]
     cols = ["Channel", "Source ID", "Witness ID", "Error ID", "Mapping Kind", "Site Anchor"]
     def section(marker, section_rows, zero):
         return marker + "\n\n" + (md_table(cols, section_rows) if section_rows else zero) + "\n"
@@ -389,6 +424,8 @@ def detector_mapping_artifact(mappings=()):
                   "No channel-mapped CV rows: no conventions were consolidated for this run.")
         + section("<!-- GENERATED:AC -->", ac_rows,
                   "No channel-mapped AC rows: the argument-contract checker emitted zero findings.")
+        + section("<!-- GENERATED:PD -->", pd_rows,
+                  "No channel-mapped PD rows: the path-derivation sweep emitted zero candidates.")
     )
 
 

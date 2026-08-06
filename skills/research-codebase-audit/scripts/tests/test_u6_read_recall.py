@@ -404,6 +404,7 @@ def detector_chain(tmp_path):
     checked = rb.run_script("check_manifests.py", root, "--audit-dir", a.audit)
     assert checked.returncode == 0, checked.stdout + checked.stderr
     rb.emit_argument_contracts(a)
+    rb.emit_path_derivations(a)
     sources = dm.parse_raw_sources(a.audit)
     source = next(iter(sources["MF"]))
     anchor = sources["MF"][source][0]["anchor"]
