@@ -89,7 +89,7 @@ def channel_artifact(*, p21=True, d03=True):
     return (
         "# Stata definition/use bundles\n\n## Scan summary\n\n"
         "- Stata files scanned: 2\n"
-        "- Standard producer groups (file + variable): 2\n"
+        "- Standard producer groups (file + gen line + variable): 2\n"
         f"- Standard candidates: {len(rows)}\n"
         "- Advisory candidates: 0\n\n## Candidate findings\n\n"
         + rb.md_table([

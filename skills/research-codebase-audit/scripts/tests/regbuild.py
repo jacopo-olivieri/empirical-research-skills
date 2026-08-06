@@ -427,7 +427,7 @@ def definition_use_artifact(bundle_ids=(), *, standard_bundle_ids=None,
     return (
         "# Stata definition/use bundles\n\n## Scan summary\n\n"
         f"- Stata files scanned: {files_scanned}\n"
-        f"- Standard producer groups (file + variable): {producer_groups}\n"
+        f"- Standard producer groups (file + gen line + variable): {producer_groups}\n"
         f"- Standard candidates: {len(standard_rows)}\n"
         f"- Advisory candidates: {len(advisory_rows)}\n\n"
         "## Candidate findings\n\n" + standard_table + "\n"

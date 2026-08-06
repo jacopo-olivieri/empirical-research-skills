@@ -52,6 +52,8 @@ does not assume a defect exists; an explicit clean outcome is acceptable.
 Re-read the whole file, not just the neighbourhood of the known finding. Do not stop at the
 first thing you notice. Look for the defect classes in `{CONTRACT_PATH}` that the known
 findings above do NOT already cover.
+For each flag assigned inside a loop, decide: can a later iteration overwrite an earlier
+iteration's value?
 
 **Empirical probe — establish behavior, do not infer it.** Follow the **Empirical verification**
 rules in `{CONTRACT_PATH}`, which define which fragments qualify (a structural trigger keyed

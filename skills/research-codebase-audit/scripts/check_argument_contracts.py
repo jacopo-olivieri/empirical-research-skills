@@ -35,6 +35,7 @@ RESOLUTIONS = {
     "direct", "macro_direct", "audited_root_alias",
     "unresolved_unknown_option", "unresolved_unknown_path",
     "unresolved_ambiguous_path", "unresolved_syntax",
+    "unresolved_interpreter",
 }
 SCRIPT_EXTENSIONS = {".py", ".r", ".jl", ".do", ".ado", ".sh", ".bash", ".zsh"}
 CALLER_EXTENSIONS = SCRIPT_EXTENSIONS
@@ -157,7 +158,6 @@ def _literal_assignments(text, adapter):
     values = {}
     patterns = {
         "shell": re.compile(r"(?m)^\s*([A-Za-z_]\w*)\s*=\s*(['\"])(.*?)\2\s*$"),
-        "stata": re.compile(r"(?im)^\s*(?:global|local)\s+([A-Za-z_]\w*)\s+(['\"])(.*?)\2\s*$"),
         "r": re.compile(r"(?m)^\s*([A-Za-z_]\w*)\s*(?:<-|=)\s*(['\"])(.*?)\2\s*$"),
         "julia": re.compile(r"(?m)^\s*([A-Za-z_]\w*)\s*=\s*(['\"])(.*?)\2\s*$"),
     }
@@ -168,12 +168,77 @@ def _literal_assignments(text, adapter):
     return values
 
 
+_STATA_ASSIGN_RE = re.compile(
+    r"(?im)^\s*(global|local)\s+([A-Za-z_]\w*)\s+(['\"])(.*?)\3\s*$"
+)
+
+
+def _stata_literal_assignments(text):
+    """Split one Stata file's literal assignments by namespace."""
+    namespaces = {"global": {}, "local": {}}
+    for match in _STATA_ASSIGN_RE.finditer(text):
+        namespaces[match.group(1).lower()][match.group(2)] = match.group(4)
+    return namespaces
+
+
+def stata_global_table(files):
+    """Package-wide literal ``global`` values from every projected do/ado file.
+
+    Conservative lexical inference: no execution order, no ``include`` flow, no
+    conditionals.  A name assigned two *different* literal values anywhere in
+    the package is unresolvable and is dropped; equal values never conflict.
+    """
+    values, conflicting = {}, set()
+    for path in files:
+        if path.suffix.lower() not in {".do", ".ado"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for name, value in _stata_literal_assignments(text)["global"].items():
+            if name in values and values[name] != value:
+                conflicting.add(name)
+            values.setdefault(name, value)
+    return {name: value for name, value in values.items()
+            if name not in conflicting}
+
+
 _VAR_RE = re.compile(
     r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)|`([A-Za-z_]\w*)'"
 )
 
 
+def _reference_syntax(match):
+    """Return the namespace a reference addresses: ``global`` or ``local``."""
+    return "local" if match.group(3) is not None else "global"
+
+
+class MacroScope:
+    """Name lookup for macro expansion, split by reference syntax.
+
+    Non-Stata adapters keep a single namespace: both syntaxes read the same
+    map, so their behavior is unchanged.  The Stata adapter passes distinct
+    maps, and the two namespaces never merge.
+    """
+
+    def __init__(self, global_values, local_values=None):
+        self._values = {
+            "global": dict(global_values),
+            "local": dict(global_values if local_values is None else local_values),
+        }
+
+    def resolve(self, name, syntax):
+        return self._values[syntax].get(name)
+
+
+def _scope(variables):
+    """Accept either a plain single-namespace mapping or an existing scope."""
+    return variables if isinstance(variables, MacroScope) else MacroScope(variables)
+
+
 def _expand_text(value, variables, stack=()):
+    scope = _scope(variables)
     expanded = False
     alias_suffix = None
     unresolved_leading = None
@@ -183,13 +248,14 @@ def _expand_text(value, variables, stack=()):
         name = next(group for group in match.groups() if group is not None)
         if name in stack:
             raise ArgumentContractError(f"literal macro/global expansion cycle at {name}")
-        if name not in variables:
+        replacement_value = scope.resolve(name, _reference_syntax(match))
+        if replacement_value is None:
             if match.start() == 0:
                 unresolved_leading = match.end()
             return match.group(0)
         expanded = True
         replacement, _was_expanded, _suffix, _unresolved = _expand_text(
-            variables[name], variables, stack + (name,)
+            replacement_value, scope, stack + (name,)
         )
         return replacement
 
@@ -201,7 +267,10 @@ def _expand_text(value, variables, stack=()):
         if first:
             original_tail = value[first.end():].lstrip("/\\")
             root_name = next(group for group in first.groups() if group is not None)
-            root_value, *_ = _expand_text(variables[root_name], variables, stack + (root_name,))
+            root_value, *_ = _expand_text(
+                scope.resolve(root_name, _reference_syntax(first)), scope,
+                stack + (root_name,),
+            )
             if (_placeholder(root_value) or _absolute_external(root_value)) and original_tail:
                 alias_suffix = original_tail
     return result, expanded, alias_suffix, unresolved_leading is not None
@@ -428,8 +497,11 @@ def _julia_invocations(relative, text):
     return calls
 
 
-def _stata_invocations(relative, text):
-    variables = _literal_assignments(text, "stata")
+def _stata_invocations(relative, text, cross_file_globals=None):
+    namespaces = _stata_literal_assignments(text)
+    # Namespaces never merge; a same-file global overrides a cross-file value.
+    variables = MacroScope({**(cross_file_globals or {}), **namespaces["global"]},
+                           namespaces["local"])
     calls = []
     offset = 0
     for line_no, line in enumerate(text.splitlines(keepends=True), start=1):
@@ -490,7 +562,7 @@ def _shell_invocations(relative, text):
     return calls
 
 
-def _invocations(path, package_root):
+def _invocations(path, package_root, stata_globals=None):
     relative = path.relative_to(package_root).as_posix()
     suffix = path.suffix.lower()
     try:
@@ -504,7 +576,7 @@ def _invocations(path, package_root):
     if suffix == ".jl":
         return _julia_invocations(relative, text)
     if suffix in {".do", ".ado"}:
-        return _stata_invocations(relative, text)
+        return _stata_invocations(relative, text, stata_globals)
     if suffix in {".sh", ".bash", ".zsh"}:
         return _shell_invocations(relative, text)
     return []
@@ -595,11 +667,46 @@ def _display_token(token, alias_suffix):
     return token
 
 
+def _interpreter_candidate(tokens):
+    """Return the callee candidate of a macro-fronted call, or None.
+
+    The trigger is adapter-independent: after expansion the first token still
+    carries an unresolved macro reference and a *later* token carries a known
+    script extension.  The first such later token is the candidate; further
+    tokens are never scanned for a more convenient script.
+    """
+    if not tokens or not _VAR_RE.search(tokens[0]):
+        return None
+    for token in tokens[1:]:
+        if Path(token.replace("\\", "/")).suffix.lower() in SCRIPT_EXTENSIONS:
+            return token
+    return None
+
+
+def _candidate_path(token, projected):
+    """Resolve the callee candidate, but only when it uniquely matches."""
+    try:
+        normalized = _normalize_candidate(token)
+    except ArgumentContractError:
+        return ""
+    direct = normalized.lstrip("./")
+    if direct in projected:
+        return direct
+    matches, ambiguous = _suffix_matches(direct, [Path(item) for item in projected])
+    return matches[0].as_posix() if len(matches) == 1 and not ambiguous else ""
+
+
 def _resolve(raw, projected):
     if raw.syntax_error or not raw.tokens:
         return "unknown", "", "", (), "unresolved_syntax"
     interpreter, index = _interpreter(raw.tokens)
     if interpreter is None:
+        candidate = _interpreter_candidate(raw.tokens)
+        if candidate is not None:
+            # The interpreter is exactly what could not be resolved.
+            return ("unknown", _display_token(candidate, raw.alias_suffix),
+                    _candidate_path(candidate, projected), (),
+                    "unresolved_interpreter")
         return "unknown", "", "", (), "unresolved_syntax"
     if interpreter != "direct":
         index, failure = _consume_options(interpreter, raw.tokens, index)
@@ -702,12 +809,14 @@ def scan(package_root, audit):
     files = _projected_files(root, manifest)
     projected = {path.relative_to(root).as_posix(): path for path in files
                  if path.suffix.lower() in SCRIPT_EXTENSIONS}
+    stata_globals = stata_global_table(files)
     raw_calls = []
     for path in files:
         if path.suffix.lower() in CALLER_EXTENSIONS:
             raw_calls.extend(
-                raw for raw in _invocations(path, root)
+                raw for raw in _invocations(path, root, stata_globals)
                 if raw.syntax_error or _interpreter(raw.tokens)[0] is not None
+                or _interpreter_candidate(raw.tokens) is not None
             )
     grouped = {}
     for raw in sorted(raw_calls, key=lambda item: (item.caller, item.line, item.offset)):
@@ -724,8 +833,8 @@ def scan(package_root, audit):
             anchor = f"{caller}:{line}@call={ordinal}"
             if resolution.startswith("unresolved_"):
                 calls.append(CallSite(
-                    sid, anchor, raw.adapter, interpreter, token or "—", "—",
-                    resolution, (), (), "unresolved_callee",
+                    sid, anchor, raw.adapter, interpreter, token or "—",
+                    callee or "—", resolution, (), (), "unresolved_callee",
                 ))
                 findings.append(Finding(
                     sid, "callsite", "unresolved_callee", "—", token or "—", anchor,

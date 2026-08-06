@@ -21,7 +21,7 @@ def run_emitter(tmp_path, text):
     return res, artifact.read_text(encoding="utf-8") if artifact.is_file() else None
 
 
-def test_constant_then_replace_flag_with_narrowed_consumer_is_standard(tmp_path):
+def test_producer_group_flag_with_narrowed_consumer_is_standard(tmp_path):
     res, art = run_emitter(tmp_path, """
 * Release eligibility covers two routes.
 gen release_ok = 0
@@ -125,13 +125,23 @@ keep if visible == 1 & wave == 1
 @pytest.mark.parametrize("body", [
     "gen sample_ok = (age >= 18)\nkeep if sample_ok == 1\n",
     "gen sample_ok = (age >= 18)\nsummarize wage\n",
-    ("gen city = \"\"\nreplace city = source_city\n"
-     "replace matched = 1 if city != \"\" & wave == 1\n"),
 ])
 def test_no_extra_conjunct_or_no_consumer_emits_nothing(tmp_path, body):
     res, art = run_emitter(tmp_path, body)
     assert res.returncode == 0
     assert "Standard candidates: 0" in art
+    assert "Advisory candidates: 0" in art
+
+
+def test_group_with_only_unguarded_replaces_still_feeds_a_narrowing_consumer(tmp_path):
+    """The producer group no longer demands a guarded member replace."""
+    res, art = run_emitter(tmp_path, (
+        "gen city = \"\"\nreplace city = source_city\n"
+        "replace matched = 1 if city != \"\" & wave == 1\n"
+    ))
+    assert res.returncode == 0
+    assert "Standard candidates: 1" in art
+    assert "producer_group" in art
     assert "Advisory candidates: 0" in art
 
 
@@ -149,7 +159,7 @@ drop if eligible == 0 & missing(score)
     assert first_ids == second_ids
     assert len(first_ids) == 2
     assert len(set(first_ids)) == 2
-    assert "Standard producer groups (file + variable): 1" in first
+    assert "Standard producer groups (file + gen line + variable): 1" in first
 
 
 def test_injected_hash_collision_fails_loudly(tmp_path, monkeypatch):
