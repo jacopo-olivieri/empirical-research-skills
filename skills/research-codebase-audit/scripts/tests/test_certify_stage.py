@@ -83,6 +83,8 @@ def test_init_records_exact_identity_and_mode_stages(tmp_path):
         "canonical_package_root",
         "tree_fingerprint",
         "mechanism_schema_version",
+        # U16: informational only; never an identity-failure input.
+        "session_id",
     }
     assert manifest["run_identity"]["canonical_package_root"] == str(root.resolve())
     assert manifest["run_identity"]["mechanism_schema_version"] == "1.0.0"
@@ -466,8 +468,14 @@ def test_resume_good_untouched_tree_passes_and_refreshes_marker(tmp_path):
     root = simple_run(tmp_path)
     marker = root / "audit" / "_run" / "RUNNING"
     marker.write_text("stale marker\n", encoding="utf-8")
-    cs.resume_check(root, clear_stale_marker=True)
-    assert "pid=" in marker.read_text(encoding="utf-8")
+    # U16: the marker records the conductor PID it is given, and omits the
+    # ``pid=`` line entirely when it is given none — so the refresh is asserted
+    # on the exact recorded value rather than on the bare key.
+    cs.resume_check(root, clear_stale_marker=True, conductor_pid=os.getpid())
+    refreshed = marker.read_text(encoding="utf-8")
+    assert "stale marker" not in refreshed
+    assert f"pid={os.getpid()}\n" in refreshed
+    assert refreshed.startswith("started_at=")
 
 
 def test_resume_test_has_teeth_when_fingerprint_is_broken(tmp_path, monkeypatch):

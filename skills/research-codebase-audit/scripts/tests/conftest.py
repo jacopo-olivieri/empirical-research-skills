@@ -49,3 +49,7 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "u15: unit U15 — the open-reading budget protection policy "
         "(phase-note partition and second-read block coverage)")
+    config.addinivalue_line(
+        "markers", "u16: unit U16 — usage-limit resilience and manifest stage "
+        "timestamps (conductor-PID marker liveness, the guarded resume "
+        "launcher, the usage feed, started_at/ended_at)")
