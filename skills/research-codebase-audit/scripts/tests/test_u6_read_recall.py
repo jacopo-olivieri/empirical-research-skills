@@ -42,11 +42,12 @@ def init_root(tmp_path, mode="replication"):
     return root, a
 
 
-def typed_footer(entries=()):
+def typed_footer(entries=(), *, reading=(), probe=()):
+    """Hand-built non-recheck footer: typed observations plus the U15 phase table."""
     return rb.md_table(
         ["Entry ID", "Kind", "Register IDs", "Observation", "Reason"],
         entries,
-    )
+    ) + "\n" + rb.phase_table_text(reading, probe)
 
 
 def claims_b3_boundary(tmp_path):
@@ -69,6 +70,7 @@ def claims_b3_boundary(tmp_path):
                                "conflicts": [], "coverage_gaps": [], "blocked_shards": []},
         "footer_dispositions": [
             "audit/_work/w1.md#OBS-0001 | dismissed:adjacent section owns it"],
+        **rb.report_phase_fields(),
     }))
     manifest = json.loads((a.audit / "_run/manifest.json").read_text())
     manifest["stages"]["claims_b2"] = {
@@ -112,6 +114,7 @@ def code_b3_boundary(tmp_path, outcome="blocked: parser unavailable"):
             "@hygiene:data-and-log-lens": "clean",
             "requirements.txt": "clean", "source.py": outcome,
         },
+        **rb.report_phase_fields(),
     }))
     manifest = json.loads((a.audit / "_run/manifest.json").read_text())
     manifest["stages"]["code_b2"] = {
@@ -157,13 +160,15 @@ def test_candidate_footer_entry_cannot_be_dismissed(tmp_path):
         rb.OUTPUT_COLS, [])
     shard += "\nCoverage: every assigned claim unit accounted for.\n\n"
     shard += typed_footer(
-        [["OBS-0001", "candidate", "C-0100", "uncertain claim", "—"]])
+        [["OBS-0001", "candidate", "C-0100", "uncertain claim", "—"]],
+        reading=["C-0100"])
     a.write("_work/w1.md", shard)
     # Post-promotion evidence: the b3 rename has put the merged rows on canon.
     a.write_register("claims_register.md", rb.CLAIMS_COLS, [claim])
     report_path = a.audit / "_run/merge_report_claims.json"
     report = json.loads(report_path.read_text())
     report["claims_register.md"].update(shard_rows=1, added=1)
+    report.update(rb.report_phase_fields(reading=["C-0100"]))
     report["footer_dispositions"] = [
         "audit/_work/w1.md#OBS-0001 | candidate:C-0100"]
     report_path.write_text(json.dumps(report), encoding="utf-8")
@@ -186,6 +191,7 @@ def test_tier1_b3b_footer_entry_cannot_vanish(tmp_path):
         "code_error_register.md": {
             "shard_rows": 1, "dedup_removed": 0, "added": 1},
         "footer_dispositions": [],
+        **rb.report_phase_fields(reading=["E-2001"], blocks=(1, 0)),
     }))
     a.write_manifest(stages={"code_b3b": {
         "status": "running", "retries": 0,
@@ -515,7 +521,11 @@ def test_seeded_detector_to_second_read_to_merge_chain(tmp_path):
     shard = rb.md_table(rb.ERROR_COLS, [plant_b]) + "\n" + rb.md_table(
         ["Script", "Outcome"], [["requirements-recall.txt", f"findings: {error_id}"]]
     ) + "\n" + typed_footer(
-        [["OBS-0001", "candidate", error_id, "incompatible pandas pins", "—"]])
+        [["OBS-0001", "candidate", error_id, "incompatible pandas pins", "—"]],
+        reading=[error_id],
+    ) + "\n" + rb.block_table_text([
+        ("`requirements-recall.txt`", "1–4", "pinned dependency list",
+         f"findings: {error_id}")])
     shard_path = a.audit.parent / owner["Shard File"].strip().strip("`")
     shard_path.parent.mkdir(parents=True, exist_ok=True)
     shard_path.write_text(shard, encoding="utf-8")
@@ -529,6 +539,7 @@ def test_seeded_detector_to_second_read_to_merge_chain(tmp_path):
         "code_error_register.md": {"shard_rows": 1, "dedup_removed": 0, "added": 1},
         "footer_dispositions": [
             f"{owner['Shard File'].strip().strip('`')}#OBS-0001 | candidate:{error_id}"],
+        **rb.report_phase_fields(reading=[error_id], blocks=(len(alloc), len(alloc) - 1)),
     }))
     manifest = json.loads((a.audit / "_run/manifest.json").read_text())
     shard_states = {
@@ -539,10 +550,15 @@ def test_seeded_detector_to_second_read_to_merge_chain(tmp_path):
         other_path = a.audit.parent / other["Shard File"].strip().strip("`")
         other_path.parent.mkdir(parents=True, exist_ok=True)
         scope = other["Script Scope"].strip().strip("`")
+        scope_lines = len(
+            (a.audit.parent / scope).read_text(encoding="utf-8").splitlines())
         other_path.write_text(
             rb.md_table(rb.ERROR_COLS, []) + "\n" +
             rb.md_table(["Script", "Outcome"], [[scope, "clean"]]) + "\n" +
-            typed_footer(), encoding="utf-8")
+            typed_footer() + "\n" +
+            rb.block_table_text([
+                (f"`{scope}`", f"1–{scope_lines}", "whole file", "clean")]),
+            encoding="utf-8")
         shard_states[other["Shard File"].strip().strip("`")] = {
             "status": "done", "retries": 0}
     manifest["stages"]["code_b3b"]["shards"] = shard_states
@@ -653,7 +669,8 @@ def claims_b3b_promoted(tmp_path):
         "| Worker ID | File/Section Scope | Shard File | Claim ID Range | "
         "Output ID Range | Reason | Known Findings | Assigned Handoff IDs |\n"
         "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| S1 | sec 2 | `audit/_work_second_read/s1.md` | C-2000\u2013C-2049 | "
+        "| S1 | sec 2 \u2014 `paper/sec2.md:1\u201340` | "
+        "`audit/_work_second_read/s1.md` | C-2000\u2013C-2049 | "
         "O-2000\u2013O-2024 | flagged | \u2014 |  |\n"
     )
     a.write("plans/claims_second_read_plan.md", plan)
@@ -662,7 +679,11 @@ def claims_b3b_promoted(tmp_path):
         rb.OUTPUT_COLS, [])
     shard += "\nCoverage: flagged section reread in full.\n\n"
     shard += typed_footer(
-        [["OBS-0001", "candidate", "C-2000", "second-read find", "\u2014"]])
+        [["OBS-0001", "candidate", "C-2000", "second-read find", "\u2014"]],
+        reading=["C-2000"])
+    shard += "\n" + rb.block_table_text([
+        ("`paper/sec2.md`", "1\u201320", "opening argument", "findings: C-2000"),
+        ("`paper/sec2.md`", "21\u201340", "robustness discussion", "clean")])
     a.write("_work_second_read/s1.md", shard)
     a.write_register("_run/snapshots/claims_b3b/claims_register.md",
                      rb.CLAIMS_COLS, [])
@@ -675,6 +696,7 @@ def claims_b3b_promoted(tmp_path):
         "output_register.md": {"shard_rows": 0, "dedup_removed": 0, "added": 0},
         "footer_dispositions": [
             "audit/_work_second_read/s1.md#OBS-0001 | candidate:C-2000"],
+        **rb.report_phase_fields(reading=["C-2000"], blocks=(2, 1)),
     }))
     manifest = json.loads((a.audit / "_run/manifest.json").read_text())
     manifest["stages"]["claims_b3b"] = {
@@ -743,6 +765,7 @@ def test_code_b3b_zero_work_skip_certifies_through_cli(tmp_path):
         "code_error_register.md": {
             "shard_rows": 0, "dedup_removed": 0, "added": 0},
         "footer_dispositions": [],
+        **rb.report_phase_fields(blocks=(0, 0)),
     }))
     shutil.rmtree(a.audit / "_staging", ignore_errors=True)
     finished = cli(root, "finish", "--stage", "code_b3b", "--outcome", "done")

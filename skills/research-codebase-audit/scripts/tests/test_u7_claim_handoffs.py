@@ -115,6 +115,8 @@ def claims_shard(claim_rows=(), *, handoff_rows=None, x_rows=None):
              else rb.md_table(ch.X_COVERAGE_COLS, x_rows))
     body += "\n### Coverage\n\nEvery assertion in scope was reviewed.\n"
     body += "\n### Footer dispositions\n\n" + rb.md_table(lint.FOOTER_COLS, [])
+    body += "\n### Reading phase\n\n" + rb.phase_table_text(
+        [row[0] for row in claim_rows])
     return body
 
 
@@ -166,6 +168,7 @@ def write_empty_canon_and_report(root):
         "output_register.md": {"shard_rows": 0, "dedup_removed": 0, "added": 0,
                                "conflicts": [], "coverage_gaps": [], "blocked_shards": []},
         "footer_dispositions": [],
+        **rb.report_phase_fields(),
     }
     (audit / "_run/merge_report_claims.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
@@ -199,7 +202,9 @@ def add_b3b_resolution(root, rows, body_worker):
         "# Claims second-read plan\n\n"
         "| Worker ID | File/Section Scope | Shard File | Claim ID Range | Output ID Range | Reason | Known Findings | Assigned Handoff IDs |\n"
         "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        f"| R1 | appendix | `audit/_work_second_read/r1.md` | C-2000–C-2049 | O-2000–O-2029 | handoff | — | {forwarded['id']} |\n"
+        f"| R1 | appendix — `paper/appendix.tex:1–30` | "
+        f"`audit/_work_second_read/r1.md` | C-2000–C-2049 | O-2000–O-2029 | "
+        f"handoff | — | {forwarded['id']} |\n"
     )
     (audit / "plans/claims_second_read_plan.md").write_text(plan, encoding="utf-8")
     # Paper Context stays the registers.md prose locator; the machine anchor
@@ -222,6 +227,11 @@ def add_b3b_resolution(root, rows, body_worker):
     body += "\n### Footer dispositions\n\n" + rb.md_table(
         lint.FOOTER_COLS, [["OBS-0001", "candidate", "C-2000", "row retained", ""]]
     )
+    body += "\n### Reading phase\n\n" + rb.phase_table_text(["C-2000"])
+    # C-2000 is cited by a resolved handoff row, so it is exempt from the
+    # claims block-findings equality (review F2): every block reads clean.
+    body += "\n### Block coverage\n\n" + rb.block_table_text([
+        ("`paper/appendix.tex`", "1–30", "appendix prose", "clean")])
     shard.write_text(body, encoding="utf-8")
     snap = audit / "_run/snapshots/claims_b3b"
     snap.mkdir(parents=True, exist_ok=True)
@@ -239,6 +249,7 @@ def add_b3b_resolution(root, rows, body_worker):
         "footer_dispositions": [
             "audit/_work_second_read/r1.md#OBS-0001 | candidate:C-2000"
         ],
+        **rb.report_phase_fields(reading=["C-2000"], blocks=(1, 1)),
     }
     (audit / "_run/merge_report_claims_b3b.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")

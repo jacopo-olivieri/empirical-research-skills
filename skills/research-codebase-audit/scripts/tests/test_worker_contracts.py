@@ -10,6 +10,14 @@ builder = rb.load_script("build_worker_contracts")
 REGISTERS = rb.SKILL_DIR / "references" / "registers.md"
 PROMPTS = rb.SKILL_DIR / "references" / "prompts"
 
+# Each cap is the role contract's share of the full readme, a guardrail against
+# contract bloat rather than a frozen boundary.  U15 added the phase-table and
+# block-coverage grammar to the shared `Shard format` section, which the slice
+# table routes into every worker contract; the recheck contracts are the ones
+# most dominated by routed shared sections, so `recheck_code` moved without
+# gaining a single line of role-specific text.  Measured: 0.6094 before U15
+# against a 0.61 cap — already at the ceiling, 0.0006 of headroom — and 0.6239
+# after.  Cap raised 0.61 -> 0.63 to match.
 ROLE_SIZE_CAPS = {
     "planning": 0.72,
     "claims_first_pass": 0.62,
@@ -17,7 +25,7 @@ ROLE_SIZE_CAPS = {
     "second_read_claims": 0.70,
     "second_read_code": 0.50,
     "recheck_claims": 0.76,
-    "recheck_code": 0.61,
+    "recheck_code": 0.63,
     "merge_first_pass": 0.67,
     "merge_recheck": 0.78,
     "conventions": 0.39,

@@ -52,13 +52,22 @@ shard_rows − dedup_removed == added must hold):
         "audit/path/to/shard.md#OBS-0002 | dismissed:<one-line reason>"
       ],
       "unreviewed_files": ["<code-stream blocked-owner inventory path>", ...],
-      "coverage_outcomes": {"<code inventory path>": "<exact outcome>", ...}
+      "coverage_outcomes": {"<code inventory path>": "<exact outcome>", ...},
+      "phase_partition": {"found_by_reading": ["<ID>", ...],
+                          "found_by_probe": ["<ID>", ...]},
+      "block_coverage": {"blocks_covered": <int>, "blocks_clean": <int>}
     }
 
 `footer_dispositions` is required for both streams and contains exactly one disposition for
 every typed footer entry, joined by shard path + Entry ID. `unreviewed_files` is required for
 the code stream (use `[]` when none), as is `coverage_outcomes`, an exact path-to-outcome copy
 of every non-blocked shard coverage row; omit both for claims.
+`phase_partition` is required for both streams at b3 and b3b: it is the exact union of the
+non-blocked shards' phase-table lists, ID for ID. `block_coverage` is required for both
+streams at **b3b only** (omit it at b3): `blocks_covered` is the total number of
+block-coverage rows across the non-blocked shards and `blocks_clean` is how many of those
+rows read `clean`. The merge lint proves both by identity against the shard evidence; no
+threshold anywhere consumes them.
 
 ## WHAT TO DO
 
@@ -90,7 +99,12 @@ of every non-blocked shard coverage row; omit both for claims.
 5b. Disposition every typed footer entry. A `candidate` entry must use a candidate disposition
 that names the same row IDs; it cannot be dismissed. A `not_rowed_observation` may be promoted
 to a candidate or dismissed with a concrete one-line reason. Never drop an entry silently.
-5c. Claims only: preserve every dedicated H/X shard row as source evidence. Record every claim
+5c. Copy the union of the non-blocked shards' `found_by_reading` and `found_by_probe` lists
+into `phase_partition`, changing nothing — the two lists partition the merged shard rows.
+Second-read merges additionally count the non-blocked shards' block-coverage rows into
+`block_coverage` (`blocks_covered` = all block rows, `blocks_clean` = those whose Outcome is
+`clean`).
+5d. Claims only: preserve every dedicated H/X shard row as source evidence. Record every claim
 dedup redirect in top-level `dedup_redirects` (`dropped C-ID` → `surviving C-ID`) so the
 deterministic ledger builder can rebind cited rows; a cited row absent from canon without a
 redirect is a merge failure. {HANDOFF_LEDGER_INSTRUCTION}

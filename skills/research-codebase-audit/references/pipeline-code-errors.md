@@ -140,7 +140,9 @@ after b3d, before the recheck plan
    verifies — snapshot the post-b3d `code_error_register.md` to `audit/_run/snapshots/code_b3b/`
    and write a zero-work `audit/_run/merge_report_code_b3b.json`
    (`{"code_error_register.md": {"shard_rows": 0, "dedup_removed": 0, "added": 0},
-   "footer_dispositions": []}`) — then certify `code_b3b` done via
+   "footer_dispositions": [],
+   "phase_partition": {"found_by_reading": [], "found_by_probe": []},
+   "block_coverage": {"blocks_covered": 0, "blocks_clean": 0}}`) — then certify `code_b3b` done via
    `certify_stage.py finish --stage code_b3b --outcome done` against the canonical register
    already promoted by b3.
 2. **Dispatch** `prompts/second-read-worker.md` (stream = code-error; role:

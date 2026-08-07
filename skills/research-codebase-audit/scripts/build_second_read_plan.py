@@ -100,7 +100,7 @@ def _coverage(audit, manifest, plan_text):
             continue
         lint = lr.Lint()
         text = _read(shard)
-        _entries, rows = lr.typed_shard_footer(lint, shard, text, "code")
+        _entries, rows, _phase = lr.typed_shard_footer(lint, shard, text, "code")
         if lint.errors:
             raise PlanError("; ".join(lint.errors))
         for row in rows:

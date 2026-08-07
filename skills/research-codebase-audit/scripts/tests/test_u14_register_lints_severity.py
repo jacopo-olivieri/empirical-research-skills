@@ -59,6 +59,9 @@ def footer_errors(reason, *, stream="claims", recheck=False):
     text = footer_table([note_entry(reason)])
     if stream == "code" and not recheck:
         text += "\n" + rb.md_table(lint.COVERAGE_COLS, [["`py/x.py`", "clean"]])
+    if not recheck:
+        # U15: the non-recheck footer carries the phase table as its third part.
+        text += "\n" + rb.phase_table_text()
     lint.typed_shard_footer(state, "shard.md", text, stream, recheck=recheck)
     return state.errors
 
@@ -99,7 +102,10 @@ def test_all_three_labels_together_pass_beside_a_candidate():
     entries = [note_entry(reason, index) for index, reason
                in enumerate(GOOD_REASONS, start=1)]
     entries.append(["OBS-0004", "candidate", "C-0801", "a defect", ""])
-    lint.typed_shard_footer(state, "shard.md", footer_table(entries), "claims")
+    lint.typed_shard_footer(
+        state, "shard.md",
+        footer_table(entries) + "\n" + rb.phase_table_text(["C-0801"]),
+        "claims")
     assert state.errors == []
 
 
@@ -128,6 +134,7 @@ def _b2_code_shard(tmp_path, reason):
     text += "\n### Coverage\n\n"
     text += rb.md_table(lint.COVERAGE_COLS, [["`py/x.py`", "clean"]])
     text += "\n### Footer dispositions\n\n" + footer_table([note_entry(reason)])
+    text += "\n### Reading phase\n\n" + rb.phase_table_text()
     return a, a.write("_code_errors/k1.md", text)
 
 
@@ -159,8 +166,15 @@ def test_b3b_shard_lint_inherits_the_reason_rule(tmp_path):
     # A second call site of the single owner, through the production CLI.
     a, shard = rb.make_b3b_shard(tmp_path / "b3b", "code", error_rows=[])
     note = " | ".join(note_entry(OLD_BARE_EXHAUSTION))
-    shard.write_text(shard.read_text(encoding="utf-8") + f"| {note} |\n",
-                     encoding="utf-8")
+    # Append the note row to the typed-observations table, which the U15
+    # phase and block tables now follow.
+    original = shard.read_text(encoding="utf-8")
+    anchor = "| " + " | ".join(lint.FOOTER_COLS) + " |"
+    head, sep, tail = original.partition(anchor)
+    table_end = tail.index("\n\n") + 1
+    shard.write_text(
+        head + sep + tail[:table_end] + f"| {note} |\n" + tail[table_end:],
+        encoding="utf-8")
     failed = rb.lint(a, "b3b-code", shard)
     assert failed.returncode == 1, failed.stdout + failed.stderr
     assert "OBS-0001" in failed.stdout

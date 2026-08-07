@@ -176,6 +176,22 @@ COVERAGE_FINDINGS_RE = re.compile(
 )
 COVERAGE_BLOCKED_RE = re.compile(r"blocked:\s*(\S.*)$")
 HYGIENE_SINGLETON = "@hygiene:data-and-log-lens"
+# U15 Rule 2: the third footer element.  The phase table partitions the shard's
+# own row IDs into the rows reading found and the rows a probe added.  The lint
+# proves partition only — it never judges the two counts against anything.
+PHASE_COLS = ["Phase", "Register IDs"]
+PHASE_ROWS = ("found_by_reading", "found_by_probe")
+# U15 Rule 3: the second-read block-coverage table.  `Block Lines` are source
+# line numbers, not register identifiers, so they need their own dash-class
+# range grammar (RANGE_RE above matches C-0001–C-0005 forms).
+BLOCK_COVERAGE_COLS = ["Scope", "Block Lines", "Purpose", "Outcome"]
+BLOCK_LINES_RE = re.compile(r"^(\d+)\s*[–—-]\s*(\d+)$")
+# A conductor-declared claims span: `<repo-relative path>:<start>–<end>`, with an
+# optional `blocked:` marker in front.  Backticks are optional so the blocked
+# form documented in pipeline-claims.md parses identically.
+CLAIMS_SPAN_RE = re.compile(
+    r"(?P<blocked>blocked:\s*)?`?(?P<path>[^\s`:|]+):(?P<start>\d+)\s*[–—-]\s*(?P<end>\d+)`?"
+)
 SECOND_READ_PLAN_COLS = {
     "claims": [
         "Worker ID", "File/Section Scope", "Shard File", "Claim ID Range",
@@ -1089,12 +1105,84 @@ def footer_reason_failure(reason):
     return None
 
 
+def phase_id_cell(lint, path, phase, value):
+    """Parse one `;`-separated Register IDs cell of the phase table."""
+    if blank_cell(value):
+        return []
+    ids = []
+    for token in str(value).split(";"):
+        token = token.strip().strip("`")
+        if not token:
+            continue
+        if not re.fullmatch(r"[CEO]-\d{4}", token):
+            lint.fail(
+                f"{path}: phase table row {phase!r} cell {token!r} must be a "
+                "';'-separated list of register IDs (blank = empty)"
+            )
+            continue
+        ids.append(token)
+    return ids
+
+
+def phase_table(lint, path, text):
+    """Validate the U15 phase table and return its two-list partition.
+
+    Grammar only: exactly one `| Phase | Register IDs |` table with exactly the
+    two rows ``found_by_reading`` then ``found_by_probe``.  Membership against
+    the shard's own rows is proved in ``validate_footer_candidates``, which
+    already owns the row-ID algebra.
+    """
+    empty = {"found_by_reading": [], "found_by_probe": [], "parsed": False}
+    matches = [(rows, line) for headers, rows, line in parse_tables(text)
+               if headers == PHASE_COLS]
+    if len(matches) != 1:
+        lint.fail(
+            f"{path}: expected exactly one phase table with columns "
+            + " | ".join(PHASE_COLS)
+        )
+        return empty
+    rows, _line = matches[0]
+    if len(rows) != len(PHASE_ROWS):
+        lint.fail(
+            f"{path}: phase table must have exactly {len(PHASE_ROWS)} rows "
+            f"({', '.join(PHASE_ROWS)}), got {len(rows)}"
+        )
+        return empty
+    parsed = {}
+    for index, (row, expected) in enumerate(zip(rows, PHASE_ROWS), start=1):
+        if len(row) != len(PHASE_COLS):
+            lint.fail(
+                f"{path}: phase table row {index} has {len(row)} cells, "
+                f"expected {len(PHASE_COLS)}"
+            )
+            return empty
+        label = row[0].strip().strip("`")
+        if label != expected:
+            lint.fail(
+                f"{path}: phase table row {index} must be {expected!r}, "
+                f"got {label!r}"
+            )
+            return empty
+        ids = phase_id_cell(lint, path, expected, row[1])
+        for duplicate in sorted({i for i in ids if ids.count(i) > 1}):
+            lint.fail(
+                f"{path}: phase table lists {duplicate} twice under {expected}"
+            )
+        parsed[expected] = ids
+    parsed["parsed"] = True
+    return parsed
+
+
 def typed_shard_footer(lint, path, text, stream, recheck=False):
-    """Validate the shared typed footer and return (entries, coverage rows).
+    """Validate the shared typed footer; return (entries, coverage, phase).
 
     Recheck workers cannot mint register rows.  In that context ``candidate``
     therefore means a defect-character observation for the consuming merge and
     its Register IDs cell is deliberately empty.
+
+    ``phase`` is the U15 two-list reading/probe partition on the first-pass and
+    second-read paths and ``None`` on recheck calls: Rules 1-3 bind the roles
+    that mint rows, and the recheck is a precision pass on rows already found.
     """
     table_matches = [(rows, line) for headers, rows, line in parse_tables(text)
                      if headers == FOOTER_COLS]
@@ -1187,7 +1275,8 @@ def typed_shard_footer(lint, path, text, stream, recheck=False):
                 kind, detail = coverage_outcome(lint, path, index, data["Outcome"])
                 coverage.append({"script": script, "outcome": data["Outcome"],
                                  "kind": kind, "detail": detail})
-    return entries, coverage
+    phase = None if recheck else phase_table(lint, path, text)
+    return entries, coverage, phase
 
 
 def shard_register_ids(text, stream):
@@ -1203,8 +1292,38 @@ def shard_register_ids(text, stream):
     return found
 
 
-def validate_footer_candidates(lint, path, text, stream, entries, coverage):
+def validate_phase_partition(lint, path, phase, row_ids):
+    """Prove the phase lists partition the shard's own row IDs.
+
+    Partition only (design call 2): the two list sizes are never compared to
+    anything, so an all-reading shard and an all-probe shard both pass.  Every
+    failure names the shard, the offending ID, and which side is wrong.
+    """
+    if phase is None or not phase.get("parsed"):
+        return
+    reading = set(phase["found_by_reading"])
+    probe = set(phase["found_by_probe"])
+    for register_id in sorted(reading & probe):
+        lint.fail(
+            f"{path}: phase table lists {register_id} in both "
+            "found_by_reading and found_by_probe"
+        )
+    listed = reading | probe
+    for register_id in sorted(listed - row_ids):
+        lint.fail(
+            f"{path}: phase table lists {register_id}, which is not a row "
+            "in the shard"
+        )
+    for register_id in sorted(row_ids - listed):
+        lint.fail(
+            f"{path}: shard row {register_id} is missing from both phase lists"
+        )
+
+
+def validate_footer_candidates(lint, path, text, stream, entries, coverage,
+                               phase=None):
     row_ids = shard_register_ids(text, stream)
+    validate_phase_partition(lint, path, phase, row_ids)
     footer_ids = set()
     for entry in entries:
         if entry["Kind"] != "candidate":
@@ -1253,6 +1372,316 @@ def validate_footer_candidates(lint, path, text, stream, entries, coverage):
                 )
 
 
+def parse_claims_spans(lint, path, cell):
+    """Parse the conductor-declared span tokens of one claims allocation cell.
+
+    Returns ``(readable, blocked)`` maps of repo-relative path -> list of
+    ``(start, end)`` spans.  A cell may declare **several** spans of the same
+    file (the grammar is one or more `;`-separated tokens), and each declared
+    span is tiled independently, so a worker covering one interior slice of a
+    multi-span assignment cannot pass by silently dropping the others.
+
+    The span-to-section correspondence is conductor judgment at plan time; once
+    declared, the worker's blocks must tile it endpoint-to-endpoint, so a cell
+    carrying no parseable span token fails closed.  A path declared both
+    readable and blocked is contradictory and is dropped from both maps after
+    failing, rather than being left to deadlock the block checks.
+    """
+    readable, blocked = {}, {}
+    for match in CLAIMS_SPAN_RE.finditer(str(cell or "")):
+        source = match.group("path").strip()
+        start, end = int(match.group("start")), int(match.group("end"))
+        if source.startswith("/") or ".." in Path(source).parts:
+            lint.fail(
+                f"{path}: claims span declaration {source!r} must be a "
+                "repo-relative path"
+            )
+            continue
+        if start > end or start < 1:
+            lint.fail(
+                f"{path}: claims span declaration {source}:{start}–{end} is "
+                "not a 1-based start ≤ end range"
+            )
+            continue
+        target = blocked if match.group("blocked") else readable
+        if (start, end) in target.get(source, ()):
+            lint.fail(
+                f"{path}: claims span {source}:{start}–{end} is declared twice"
+            )
+            continue
+        target.setdefault(source, []).append((start, end))
+    for source in sorted(set(readable) & set(blocked)):
+        lint.fail(
+            f"{path}: claims span declaration {source!r} is declared both "
+            "readable and blocked; a scope is one or the other"
+        )
+        readable.pop(source, None)
+        blocked.pop(source, None)
+    if not readable and not blocked:
+        lint.fail(
+            f"{path}: claims second-read allocation cell {str(cell or '').strip()!r} "
+            "declares no readable span token `<path>:<start>–<end>` "
+            "(the block-coverage extent anchor)"
+        )
+    return {key: sorted(value) for key, value in readable.items()}, \
+        {key: sorted(value) for key, value in blocked.items()}
+
+
+def assign_blocks_to_spans(lint, path, scope, blocks, spans):
+    """Bucket one scope's block rows by the declared span each starts inside."""
+    buckets = {span: [] for span in spans}
+    for block in blocks:
+        owner = next((span for span in spans
+                      if span[0] <= block["start"] <= span[1]), None)
+        if owner is None:
+            lint.fail(
+                f"{path}: {scope} block {block['start']}–{block['end']} starts "
+                "outside every declared span ("
+                + ", ".join(f"{first}–{last}" for first, last in spans) + ")"
+            )
+            continue
+        buckets[owner].append(block)
+    return buckets
+
+
+def check_block_contiguity(lint, path, scope, blocks):
+    """Prove consecutive blocks of one span leave no gap and no overlap."""
+    for previous, following in zip(blocks, blocks[1:]):
+        if following["start"] > previous["end"] + 1:
+            lint.fail(
+                f"{path}: {scope} has a block gap between lines "
+                f"{previous['end']} and {following['start']}"
+            )
+        elif following["start"] <= previous["end"]:
+            lint.fail(
+                f"{path}: {scope} blocks {previous['start']}–{previous['end']} "
+                f"and {following['start']}–{following['end']} overlap"
+            )
+
+
+def check_block_extent(lint, path, scope, blocks, first, last):
+    """Prove one span's blocks reach both of its declared endpoints."""
+    if not blocks:
+        return
+    if blocks[0]["start"] != first:
+        lint.fail(
+            f"{path}: {scope} blocks start at {blocks[0]['start']}, "
+            f"but the assigned scope starts at line {first}"
+        )
+    if blocks[-1]["end"] != last:
+        lint.fail(
+            f"{path}: {scope} blocks end at {blocks[-1]['end']}, "
+            f"but the assigned scope ends at line {last}"
+        )
+
+
+def block_coverage_table(lint, audit, path, text, stream, allocation, coverage,
+                         row_ids, exempt_ids=frozenset()):
+    """Validate the U15 second-read block-coverage table; return its rows.
+
+    Proves four things per readable assigned scope: the grammar, a gap-free and
+    overlap-free tiling, the extent anchor (code: the scope file's actual last
+    line; claims: the conductor-declared span's endpoints), and that the block
+    outcomes agree with the shard's rows.  ``Purpose`` is free prose and is
+    never linted for content — the duty is over WHERE attention goes.
+
+    Tiling and extent are proved **per declared span**, not per scope: a claims
+    allocation may name several spans of one file, and each is anchored to its
+    own endpoints so an uncovered span cannot hide behind a covered sibling.
+    """
+    matches = [(rows, line) for headers, rows, line in parse_tables(text)
+               if headers == BLOCK_COVERAGE_COLS]
+    if len(matches) != 1:
+        lint.fail(
+            f"{path}: expected exactly one block-coverage table with columns "
+            + " | ".join(BLOCK_COVERAGE_COLS)
+        )
+        return []
+    if stream == "code":
+        readable = {row["script"] for row in coverage
+                    if row["kind"] != "blocked" and row["script"] != HYGIENE_SINGLETON}
+        blocked = {row["script"] for row in coverage if row["kind"] == "blocked"}
+    else:
+        declared, blocked_spans = parse_claims_spans(
+            lint, path, (allocation or {}).get("File/Section Scope"))
+        readable, blocked = set(declared), set(blocked_spans)
+
+    blocks = []
+    rows, _line = matches[0]
+    for index, row in enumerate(rows, start=1):
+        if len(row) != len(BLOCK_COVERAGE_COLS):
+            lint.fail(
+                f"{path}: block-coverage row {index} has {len(row)} cells, "
+                f"expected {len(BLOCK_COVERAGE_COLS)}"
+            )
+            continue
+        data = dict(zip(BLOCK_COVERAGE_COLS, row))
+        scope = data["Scope"].strip().strip("`")
+        span = BLOCK_LINES_RE.fullmatch(data["Block Lines"].strip())
+        if span is None:
+            lint.fail(
+                f"{path}: block-coverage row {index} Block Lines "
+                f"{data['Block Lines'].strip()!r} must be '<start>–<end>'"
+            )
+            continue
+        start, end = int(span.group(1)), int(span.group(2))
+        if start < 1 or start > end:
+            lint.fail(
+                f"{path}: block-coverage row {index} lines {start}–{end} must "
+                "be 1-based with start ≤ end"
+            )
+            continue
+        if blank_cell(data["Purpose"]) or "\n" in data["Purpose"]:
+            lint.fail(
+                f"{path}: block-coverage row {index} requires a one-line Purpose"
+            )
+        outcome = data["Outcome"].strip()
+        if outcome == COVERAGE_CLEAN:
+            kind, cited = "clean", []
+        elif (found := COVERAGE_FINDINGS_RE.fullmatch(outcome)):
+            kind = "findings"
+            cited = re.findall(r"[CEO]-\d{4}", found.group(1))
+        else:
+            lint.fail(
+                f"{path}: block-coverage row {index} outcome {outcome!r} must "
+                "be exactly 'clean' or 'findings: <IDs>' (blocking is "
+                "scope-level, never block-level)"
+            )
+            continue
+        if scope in blocked:
+            lint.fail(
+                f"{path}: block-coverage row {index} covers blocked scope "
+                f"{scope!r}, which carries no block rows"
+            )
+            continue
+        if scope not in readable:
+            lint.fail(
+                f"{path}: block-coverage row {index} names {scope!r}, which is "
+                "not a readable assigned scope of this shard"
+            )
+            continue
+        for register_id in cited:
+            if register_id not in row_ids:
+                lint.fail(
+                    f"{path}: block {scope} {start}–{end} cites {register_id}, "
+                    "which is not a row in the shard"
+                )
+        blocks.append({"scope": scope, "start": start, "end": end,
+                       "kind": kind, "cited": cited})
+
+    by_scope = {}
+    for block in blocks:
+        by_scope.setdefault(block["scope"], []).append(block)
+    for scope in sorted(readable):
+        scope_blocks = sorted(by_scope.get(scope, []), key=lambda b: b["start"])
+        if not scope_blocks:
+            lint.fail(
+                f"{path}: readable assigned scope {scope!r} carries zero "
+                "block-coverage rows"
+            )
+            continue
+        if stream == "code":
+            extent = code_scope_extent(lint, audit, path, scope)
+            if extent is None:
+                continue
+            spans = [(1, extent)]
+        else:
+            spans = declared[scope]
+        buckets = assign_blocks_to_spans(
+            lint, path, scope, scope_blocks, spans)
+        for first, last in spans:
+            span_blocks = buckets.get((first, last), [])
+            if not span_blocks:
+                lint.fail(
+                    f"{path}: {scope} declared span {first}–{last} carries "
+                    "zero block-coverage rows"
+                )
+                continue
+            check_block_contiguity(lint, path, scope, span_blocks)
+            check_block_extent(lint, path, scope, span_blocks, first, last)
+
+    cited_all = {register_id for block in blocks for register_id in block["cited"]}
+    if stream == "code":
+        for scope in sorted(readable):
+            expected = set()
+            for row in coverage:
+                if row["script"] == scope and row["kind"] == "findings":
+                    expected.update(row["detail"])
+            observed = {register_id for block in by_scope.get(scope, [])
+                        for register_id in block["cited"]}
+            if observed != expected:
+                lint.fail(
+                    f"{path}: {scope} block findings IDs do not equal its "
+                    f"| Script | Outcome | findings; "
+                    f"missing={sorted(expected - observed)}, "
+                    f"extra={sorted(observed - expected)}"
+                )
+    else:
+        expected = {i for i in row_ids if i.startswith("C-")} - set(exempt_ids)
+        observed = {i for i in cited_all if i.startswith("C-")}
+        if observed != expected:
+            lint.fail(
+                f"{path}: block findings IDs do not equal the shard's "
+                f"non-handoff claim rows; missing={sorted(expected - observed)}, "
+                f"extra={sorted(observed - expected)}"
+            )
+    return blocks
+
+
+def code_scope_extent(lint, audit, path, scope):
+    """Line count of one code-stream scope, read from the audited tree.
+
+    Repo-relative scopes resolve against the audit dir's parent — the standard
+    layout every register path already assumes.  Blocked scopes are excluded
+    before this is reached, so an off-limits file is never opened; a missing or
+    unreadable scope file is a hard fail.
+    """
+    if scope.startswith("/") or ".." in Path(scope).parts:
+        lint.fail(f"{path}: block-coverage scope {scope!r} must be repo-relative")
+        return None
+    source = audit.parent / scope
+    try:
+        content = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        lint.fail(
+            f"{path}: cannot read block-coverage scope {scope!r} at {source} "
+            f"to anchor its extent ({exc})"
+        )
+        return None
+    lines = len(content.splitlines())
+    if not lines:
+        lint.fail(f"{path}: block-coverage scope {scope!r} at {source} is empty")
+        return None
+    return lines
+
+
+def reconcile_block_coverage(lint, audit, allocations, stream, manifest,
+                             exempt_ids=frozenset()):
+    """Re-run the full block validator at the b3b merge; return (covered, clean).
+
+    The merge re-verifies rather than trusting per-shard state: two counts
+    cannot prove ranges, gaps, or extent, so invalid blocks must not cross the
+    merge even if a per-shard lint run was skipped or resumed over.
+    """
+    covered = clean = 0
+    for allocation in allocations or []:
+        wire = normalized_audit_path(allocation.get("Shard File"))
+        if manifest_shard_state(manifest, f"{stream}_b3b", wire) == "blocked":
+            continue
+        path = audit_path(audit, wire)
+        text = read_text(lint, path)
+        if text is None:
+            continue
+        _entries, coverage, _phase = typed_shard_footer(lint, path, text, stream)
+        blocks = block_coverage_table(
+            lint, audit, path, text, stream, allocation, coverage,
+            shard_register_ids(text, stream), exempt_ids,
+        )
+        covered += len(blocks)
+        clean += sum(1 for block in blocks if block["kind"] == "clean")
+    return covered, clean
+
+
 def parse_footer_dispositions(lint, report_path, report):
     """Parse the documented footer-disposition line grammar."""
     raw = report.get("footer_dispositions", [])
@@ -1285,10 +1714,16 @@ def parse_footer_dispositions(lint, report_path, report):
 def reconcile_footer_dispositions(lint, audit, allocations, stream,
                                   report_path, report, staging_ids, manifest,
                                   worker_stage):
-    """Prove the exact-one typed-footer entry/disposition join."""
+    """Prove the exact-one typed-footer entry/disposition join.
+
+    Returns the aggregate U15 phase partition — the exact union of the
+    non-blocked shards' phase lists — which the merge-report identity check
+    then proves against the report's `phase_partition` field.
+    """
     stage = manifest.get("stages", {}).get(worker_stage, {}) \
         if isinstance(manifest, dict) else {}
     shard_states = stage.get("shards", {}) if isinstance(stage, dict) else {}
+    observed_phase = {name: set() for name in PHASE_ROWS}
     expected = {}
     for allocation in allocations or []:
         wire = normalized_audit_path(allocation.get("Shard File"))
@@ -1299,8 +1734,11 @@ def reconcile_footer_dispositions(lint, audit, allocations, stream,
         text = read_text(lint, path)
         if text is None:
             continue
-        entries, coverage = typed_shard_footer(lint, path, text, stream)
-        validate_footer_candidates(lint, path, text, stream, entries, coverage)
+        entries, coverage, phase = typed_shard_footer(lint, path, text, stream)
+        validate_footer_candidates(lint, path, text, stream, entries, coverage,
+                                   phase)
+        for name in PHASE_ROWS:
+            observed_phase[name].update((phase or {}).get(name, []))
         for entry in entries:
             key = (wire, entry["Entry ID"])
             if key in expected:
@@ -1334,6 +1772,56 @@ def reconcile_footer_dispositions(lint, audit, allocations, stream,
                     f"{report_path}: {key[0]}#{key[1]} candidate disposition IDs "
                     "do not match the shard entry"
                 )
+    return {name: sorted(observed_phase[name]) for name in PHASE_ROWS}
+
+
+def check_phase_partition_report(lint, report_path, report, observed):
+    """Prove the merge report's `phase_partition` equals the shard evidence.
+
+    Identity only, exactly as `coverage_outcomes` is proved: no threshold reads
+    these lists anywhere — Rule 4's drift line is reported, never gated.
+    """
+    reported = report.get("phase_partition")
+    if not isinstance(reported, dict):
+        lint.fail(f"{report_path}: must carry object-valued 'phase_partition'")
+        return
+    normalized = {}
+    for name in PHASE_ROWS:
+        value = reported.get(name)
+        if not isinstance(value, list) or any(not isinstance(i, str) for i in value):
+            lint.fail(
+                f"{report_path}: phase_partition must carry list-valued "
+                f"'{name}'"
+            )
+            return
+        normalized[name] = sorted(value)
+    if normalized != observed:
+        lint.fail(
+            f"{report_path}: phase_partition disagrees with shard evidence; "
+            f"recorded={normalized}, observed={observed}"
+        )
+
+
+def check_block_coverage_report(lint, report_path, report, covered, clean):
+    """Prove the b3b report's `block_coverage` equals the re-validated blocks."""
+    reported = report.get("block_coverage")
+    if not isinstance(reported, dict):
+        lint.fail(f"{report_path}: must carry object-valued 'block_coverage'")
+        return
+    try:
+        values = (int(reported["blocks_covered"]), int(reported["blocks_clean"]))
+    except (KeyError, ValueError, TypeError):
+        lint.fail(
+            f"{report_path}: block_coverage must carry integer "
+            "'blocks_covered' and 'blocks_clean'"
+        )
+        return
+    if values != (covered, clean):
+        lint.fail(
+            f"{report_path}: block_coverage disagrees with shard evidence; "
+            f"recorded blocks_covered={values[0]}, blocks_clean={values[1]}; "
+            f"observed blocks_covered={covered}, blocks_clean={clean}"
+        )
 
 
 # --------------------------------------------------------------- stage checks
@@ -2019,8 +2507,9 @@ def stage_b2(lint, audit, stream, shard):
                 lint.fail(f"{shard}: Related Claim IDs must be empty at b2")
         check_abs_paths(lint, shard, e_rows, ERROR_COLS, ["Code/Data Source", "Code Location"])
     shard_footer(lint, shard, text)
-    entries, coverage = typed_shard_footer(lint, shard, text, stream)
-    validate_footer_candidates(lint, shard, text, stream, entries, coverage)
+    entries, coverage, phase = typed_shard_footer(lint, shard, text, stream)
+    validate_footer_candidates(lint, shard, text, stream, entries, coverage,
+                               phase)
 
 
 def load_register(lint, path, cols, allow_extra=False):
@@ -2141,8 +2630,9 @@ def reconcile_code_coverage(lint, audit, plan, allocations, manifest):
         text = read_text(lint, path)
         if text is None:
             continue
-        entries, coverage = typed_shard_footer(lint, path, text, "code")
-        validate_footer_candidates(lint, path, text, "code", entries, coverage)
+        entries, coverage, phase = typed_shard_footer(lint, path, text, "code")
+        validate_footer_candidates(lint, path, text, "code", entries, coverage,
+                                   phase)
         for row in coverage:
             row = {**row, "shard": wire}
             observed.setdefault(row["script"], []).append(row)
@@ -2305,10 +2795,11 @@ def stage_b3(lint, audit, stream, manifest):
             lint, audit, report_path, rep, "claims_b3"
         )
     if enforce_read_layer:
-        reconcile_footer_dispositions(
+        observed_phase = reconcile_footer_dispositions(
             lint, audit, alloc, stream, report_path, rep, staging_ids, manifest,
             worker_stage,
         )
+        check_phase_partition_report(lint, report_path, rep, observed_phase)
     if stream == "code" and enforce_read_layer:
         reported = rep.get("unreviewed_files")
         if not isinstance(reported, list):
@@ -2492,10 +2983,15 @@ def stage_b3b(lint, audit, stream, manifest):
         _path, loaded = promoted_register(lint, audit, "b3b", stream, f, cols)
         if loaded:
             staging_ids.update(col(loaded[1], cols, idc))
-    reconcile_footer_dispositions(
+    observed_phase = reconcile_footer_dispositions(
         lint, audit, alloc, stream, report_path, rep, staging_ids, manifest,
         f"{stream}_b3b",
     )
+    check_phase_partition_report(lint, report_path, rep, observed_phase)
+    covered, clean = reconcile_block_coverage(
+        lint, audit, alloc, stream, manifest, handoff_resolution_cids,
+    )
+    check_block_coverage_report(lint, report_path, rep, covered, clean)
     added_total = 0
     for f, cols, idc in files:
         entry = rep.get(f)
@@ -2608,8 +3104,14 @@ def stage_b3b_shard(lint, audit, stream, shard):
                 lint.fail(f"{shard}: Related Claim IDs must be blank at b3b (cross-link is a later stage)")
         check_abs_paths(lint, shard, e_rows, ERROR_COLS, ["Code/Data Source", "Code Location"])
     shard_footer(lint, shard, text)
-    entries, coverage = typed_shard_footer(lint, shard, text, stream)
-    validate_footer_candidates(lint, shard, text, stream, entries, coverage)
+    entries, coverage, phase = typed_shard_footer(lint, shard, text, stream)
+    validate_footer_candidates(lint, shard, text, stream, entries, coverage,
+                               phase)
+    block_coverage_table(
+        lint, audit, shard, text, stream, a, coverage,
+        shard_register_ids(text, stream),
+        handoff_claim_ids if stream == "claims" else frozenset(),
+    )
 
 
 def recheck_plan_path(audit, stream, supplementary=False):
@@ -3342,7 +3844,7 @@ def stage_b5(
         lint.warn(f"{shard}: ladder level {ladder} but every check is static_source_verified")
     stages = manifest.get("stages", {}) if isinstance(manifest, dict) else {}
     if supplementary or f"{stream}_b6a" in stages:
-        entries, _coverage = typed_shard_footer(
+        entries, _coverage, _phase = typed_shard_footer(
             lint, shard, text, stream, recheck=True)
         # Recheck observations are deliberately not register rows.  Their
         # typed footer is reconciled at b6a (main) or b6b (supplementary).
@@ -3743,7 +4245,7 @@ def _recheck_footer_entries(lint, audit, stream, clusters, manifest, stage_key):
         text = read_text(lint, path)
         if text is None:
             continue
-        parsed, _coverage = typed_shard_footer(
+        parsed, _coverage, _phase = typed_shard_footer(
             lint, path, text, stream, recheck=True)
         for entry in parsed:
             key = (wire, entry["Entry ID"])

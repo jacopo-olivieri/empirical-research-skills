@@ -293,7 +293,10 @@ files carries exactly one of these keys; b4 is conductor-computed and has no pla
 ## Phase 4 — Report and follow-up (interactive again)
 
 Report to the user: row counts per register and status, issue-flagged rows by severity,
-blocked/`confirmation_needed` rows, degraded-confidence warnings, and the workbook path. Run
+blocked/`confirmation_needed` rows, degraded-confidence warnings, the workbook path, and
+**the reading-drift line** — rows found by reading vs. by probe (both streams, from the b3/b3b
+merge reports' `phase_partition`) and second-read blocks covered / blocks clean (from
+`block_coverage`) — reported only, never a gate or threshold. Run
 `scripts/dispatch_tracking.py report --audit-dir audit` and include its per-stage-and-role ledger
 dispatch counts versus observed hook-event counts. Name every mismatch at that granularity as an
 **instrumentation gap for operator judgment**; the ledger and event files are reported only and

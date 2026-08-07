@@ -127,8 +127,10 @@ uses the closed reason/evidence contract.
 
 Completion criterion — exhaustive: every table, figure, footnote, equation, and quantitative
 sentence in your scope has a register row or an explicit skip note with a reason. End the
-shard with the two-part footer specified in `{CONTRACT_PATH}` (coverage note + typed
-observations); the coverage note must prove the criterion above. Section-overlap notes use
+shard with the three-part footer specified in `{CONTRACT_PATH}` (coverage note + typed
+observations + phase table); the coverage note must prove the criterion above.
+Record each row's phase in the footer's phase table. This role has no probe allowance: every
+row is `found_by_reading`; leave `found_by_probe` empty. Section-overlap notes use
 `not_rowed_observation` with a reason — deduplication is the coordinator's job, not yours.
 A `not_rowed_observation` Reason must use one of exactly three labels — `tooling: …`,
 `scope: …`, or the exact string `id_exhaustion: ID range exhausted` — and the shard lint fails
