@@ -431,6 +431,58 @@ def resolve_target(package_root, audit, manifest, token):
     return "live", row
 
 
+QUANTITATIVE_CLAIM_TYPE = "quantitative_result"
+
+
+def _claim_qualifies(claim_row, output_id):
+    """True when a cross-linked claim earns severity 4 for *output_id*.
+
+    All four conditions hold together: the claim is live (not a
+    ``duplicate_of:`` tombstone), it is reciprocal (its own ``Output IDs``
+    names the output that cited it), it is used in the text, and its
+    ``Claim Type`` is ``quantitative_result``.
+    """
+    if claim_row is None:
+        return False
+    if claim_row.get("Status", "").startswith("duplicate_of:"):
+        return False
+    if claim_row.get("Used in Text") != "TRUE":
+        return False
+    if claim_row.get("Claim Type") != QUANTITATIVE_CLAIM_TYPE:
+        return False
+    return output_id in re.findall(r"O-\d{4}", claim_row.get("Output IDs", "") or "")
+
+
+def severity_four_target_failure(audit, token, target_row):
+    """Return the failed severity-4 target-type condition, or ``None``.
+
+    Read-only over the rows ``resolve_target`` already resolved: severity 4
+    is earned only when the trace target is, or cross-links to, a live,
+    reciprocal, text-used ``quantitative_result`` claim.  Called on ``live``
+    targets only, so ``target_not_live`` routing is untouched.
+    """
+    kind, target = token_target(token)
+    if kind == "artifact":
+        return ("severity 4 is unavailable in code-errors-only mode "
+                "(an RA receipt supports severity 3 at most)")
+    if kind == "claim":
+        claim_type = (target_row or {}).get("Claim Type", "")
+        if claim_type != QUANTITATIVE_CLAIM_TYPE:
+            return ("severity 4 requires a quantitative_result trace target; "
+                    f"{target} has Claim Type {claim_type or '(none)'}")
+        return None
+    linked = re.findall(r"C-\d{4}", (target_row or {}).get("Claim IDs", "") or "")
+    if not linked:
+        return ("severity 4 requires a quantitative_result trace target; "
+                f"{target} cross-links to no claim")
+    claims = _register_rows(Path(audit) / "claims_register.md", "Claim ID")
+    if any(_claim_qualifies(claims.get(claim_id), target) for claim_id in linked):
+        return None
+    return ("severity 4 requires a quantitative_result trace target; "
+            f"{target} has no live, reciprocal, text-used quantitative_result "
+            "cross-linked claim")
+
+
 def decode_mechanism(sidecar):
     value = clean(sidecar)
     if not value.startswith("b64:"):
@@ -898,12 +950,16 @@ def gate_rows(package_root, audit, manifest, rows, stage):
             classifications[error_id] = "invalid"
             failures.append(f"{error_id}: requires exactly one verifier token receipt (found {len(matching)})")
             continue
-        state, _target_row = resolve_target(package_root, audit, manifest, token)
+        state, target_row = resolve_target(package_root, audit, manifest, token)
         if state == "invalid":
             classifications[error_id] = "invalid"
             failures.append(f"{error_id}: token target is invalid")
         else:
             classifications[error_id] = state
+            if state == "live" and row.get("Severity") == "4":
+                detail = severity_four_target_failure(audit, token, target_row)
+                if detail is not None:
+                    failures.append(f"{error_id}: {token} {detail}")
     return classifications, failures
 
 

@@ -55,7 +55,8 @@ def claims_b3_boundary(tmp_path):
     shard = rb.md_table(rb.CLAIMS_COLS, []) + "\n" + rb.md_table(rb.OUTPUT_COLS, [])
     shard += "\nCoverage: every assigned claim unit accounted for.\n\n"
     shard += typed_footer([["OBS-0001", "not_rowed_observation", "—",
-                            "section overlap", "owned by adjacent section"]])
+                            "section overlap",
+                            "scope: owned by adjacent section"]])
     a.write("_work/w1.md", shard)
     a.write_register("claims_register.md", rb.CLAIMS_COLS, [])
     a.write_register("output_register.md", rb.OUTPUT_COLS, [])

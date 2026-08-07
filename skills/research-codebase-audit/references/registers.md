@@ -165,8 +165,8 @@ Severity is anchored to **author-materiality** — what the finding could do to 
 
 | Severity | Meaning |
 | --- | --- |
-| 4 | Could change a headline result's sign or significance. |
-| 3 | Changes a reported number or invalidates a robustness claim. |
+| 4 | Corrupts a quantity or sample that feeds a main quantitative result, with wide scope. |
+| 3 | Reaches a reported quantity (a robustness result, descriptive statistic, sample count, unit, or figure axis), or a main result with bounded scope. |
 | 2 | Reproducibility failure that does not change results (broken path, missing file, environment drift). |
 | 1 | Label, cosmetic, or documentation issue; note-worthy but immaterial. |
 
@@ -179,8 +179,47 @@ Severity is judged against **all reported quantities** — headline estimates, d
 statistics, sample counts, stated units, and figure axes — not only headline results.
 "Does not affect the coefficient" is never by itself grounds for severity 2 when some other
 reported number is wrong: severity 2's "does not change results" means no reported quantity
-changes, and severity 3's "changes a reported number" includes the levels and stated units of
+changes, and severity 3's reach to a reported quantity includes the levels and stated units of
 any quantity the paper reports.
+
+**How the 3–4 band is earned (non-PII code rows).** Two facts, and only these two:
+
+1. the mechanism is confirmed; and
+2. the verified lineage trace — the severity-token probe and receipt machinery described below,
+   unchanged — runs from the error location to a reported quantity.
+
+The token **is** the receipt. No numeric delta is required, and none is ever the price of
+severity 3–4. Assess lineage reach **first**, then select the severity: the reach question is
+answered from the code and the registers, so an unavailable rerun cannot answer it either way.
+
+**Anti-cap clause.** Inability to rerun an off-limits pipeline is never, by itself, grounds for
+reducing severity. "By itself" is load-bearing: a downgrade that refutes the mechanism, refutes
+the reach, or bounds the scope remains legitimate and expected.
+
+**Numeric-assertion rule.** A numeric demonstration is required only to assert a specific new
+value of a published number in the Issue Description. It is prose discipline about what a
+description may claim, never a gate on severity.
+
+**The 3-vs-4 boundary.** Severity 4 requires both halves:
+
+- **target type** — the trace target is, or cross-links to, at least one live, reciprocal,
+  text-used claim whose `Claim Type` is `quantitative_result`; and
+- **scope** — the error has wide scope, corrupting the full variable or sample rather than an
+  edge case, with the scope argument stated in the Issue Description.
+
+Severity 3 is reach to any other reported quantity (a robustness result, descriptive statistic,
+sample count, stated unit, figure axis), or main-result reach with bounded scope. The
+target-type half is mechanically enforced by the severity-token gate; the scope half stays
+worker judgment, visible in prose.
+
+**Code-errors-only mode.** An `artifact:RA-…` receipt supports **severity 3 as the maximum**;
+severity 4 is unavailable in code-errors-only mode, because there is no claims register to join
+the target type against.
+
+These rules govern non-PII code rows. The `pii_or_disclosure_risk` default above stands as its
+own exception and carries no token, and the late-severity-residual exit below is unchanged.
+The rubric is shared by both streams: a claims-row severity carries no token machinery and no
+new lint, so for claims rows the rules above govern the prose meaning of the band only.
 
 **Severe code rows require a verified terminal token.** Every non-`pii_or_disclosure_risk`
 code row at Severity 3–4 with Status `confirmed` or `confirmation_needed` carries exactly one
@@ -196,6 +235,12 @@ only special routing is an otherwise valid, receipted C-/O-token whose target la
 non-live: it crosses b6 unchanged as `target_not_live`, then b7 must reject it for an operator
 ruling. Status `confirmation_needed` is not an escape. Unsupported severity is capped at 2 or,
 in full mode only, takes the late-severity-residual exit defined below.
+
+At Severity 4 the same gate additionally joins on the resolved target's type: a `claim:` token
+must resolve to a `quantitative_result` claim; an `output:` token must cross-link to at least
+one claim that is live, reciprocal (its own `Output IDs` names that output), `Used in Text`
+TRUE, and `quantitative_result`; an `artifact:` token fails outright. The join runs only on
+`live` targets, so `target_not_live` routing is unaffected, and never on Severity 3.
 
 **Issue-flagging rule** (two register-specific, lintable forms):
 
@@ -1124,12 +1169,22 @@ bC severe mint; no bC-qualified rulings stage exists.
     `OBS-0001` in each shard and increase sequentially without gaps. The complete Kind
     vocabulary is `candidate` and `not_rowed_observation`. A `candidate` names the row ID(s)
     that embody the observation and leaves Reason empty. A `not_rowed_observation` names no
-    register ID and requires a one-line reason; it is limited to genuine non-defects such as
-    scope questions, tooling friction, or ID-range exhaustion. Every suspected defect is a
-    register row, however uncertain; confidence belongs in Status/evidence, not prose.
+    register ID and requires a one-line reason drawn from a **closed three-label vocabulary**,
+    matching `^(tooling|scope|id_exhaustion): .+` exactly (the shard lint fails anything else —
+    there is no fourth label and no `other`):
+    - `tooling:` — tool or environment friction, e.g. `tooling: pdftotext failed on appendix.pdf`;
+    - `scope:` — a question about the assigned audit task boundary only, i.e. which files or
+      sections are mine, e.g. `scope: is archived/ in my task?`;
+    - `id_exhaustion:` — exactly `id_exhaustion: ID range exhausted`, no other payload.
+
+    The three labels name audit-process operations. Nothing about the audited program has a
+    legal label: every suspected defect is a register row, however uncertain, and a decision
+    that an error cannot occur is itself a candidate row, never a note. Confidence belongs in
+    Status/evidence, not prose.
 - **Blocked-shard marker**: a shard is blocked when the conductor records it blocked with
   `certify_stage.py set-shard`; ID-range exhaustion is represented by a typed
-  `not_rowed_observation` whose reason states the exhaustion and triggers that conductor action.
+  `not_rowed_observation` whose reason is exactly `id_exhaustion: ID range exhausted` and
+  triggers that conductor action.
 - Recheck shards contain the single row-level ledger specified above, plus files inspected,
   commands run, a cluster summary, and the typed footer. The same contract applies under the two
   supplementary shard directories.
@@ -1150,8 +1205,8 @@ catches after the fact does not need to occupy a worker's attention while readin
    violations.
 3. **IDs from the assigned range only** — an out-of-range ID fails the shard lint. On
    exhaustion, apply the Overflow rule (ID conventions): stop adding rows and put
-   an `OBS-####` `not_rowed_observation` with reason `ID range exhausted`, then have the
-   conductor mark the shard blocked.
+   an `OBS-####` `not_rowed_observation` with reason exactly
+   `id_exhaustion: ID range exhausted`, then have the conductor mark the shard blocked.
 4. **Active rows complete** — a `candidate` or `confirmed` code-error row fills
    `Code/Data Source`, `Code Location`, `Error Description`, and `Why It Matters`; the lint
    fails an active row with any of these empty.

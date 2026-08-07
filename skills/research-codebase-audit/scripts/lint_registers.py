@@ -160,6 +160,15 @@ COORD_RE = re.compile(r"Merge-coordinator range:\s*([CEO]-\d{4})\s*[–—-]\s*(
 FOOTER_COLS = ["Entry ID", "Kind", "Register IDs", "Observation", "Reason"]
 FOOTER_KINDS = {"candidate", "not_rowed_observation"}
 FOOTER_ENTRY_RE = re.compile(r"OBS-(\d{4})")
+# The closed reason-type vocabulary for `not_rowed_observation` footer entries.
+# The three labels name audit-process operations; nothing about the audited code
+# has a legal label, so a judgment about the program can only be written as a
+# candidate register row.  `id_exhaustion:` is a conductor-action trigger rather
+# than a prose channel, so its payload is exact-matched too.
+FOOTER_REASON_LABELS = ("tooling", "scope", "id_exhaustion")
+FOOTER_REASON_RE = re.compile(
+    r"(?:" + "|".join(FOOTER_REASON_LABELS) + r"): .+")
+ID_EXHAUSTION_REASON = "id_exhaustion: ID range exhausted"
 COVERAGE_COLS = ["Script", "Outcome"]
 COVERAGE_CLEAN = "clean"
 COVERAGE_FINDINGS_RE = re.compile(
@@ -1059,6 +1068,27 @@ def coverage_outcome(lint, path, row_number, value):
     return "invalid", []
 
 
+def footer_reason_failure(reason):
+    """Return the failed reason-vocabulary condition, or ``None``.
+
+    A `not_rowed_observation` Reason must name one of exactly three
+    audit-process labels.  Nothing about the audited program has a legal
+    label, so a judgment that an error cannot occur has no way into the
+    footer channel and must be written as a candidate register row while the
+    worker still holds file context.
+    """
+    if not FOOTER_REASON_RE.fullmatch(reason):
+        return (
+            f"Reason {reason!r} must use one of the three legal labels "
+            "'tooling: ', 'scope: ', 'id_exhaustion: ' — a judgment about the "
+            "audited code is a candidate register row, not a note"
+        )
+    if reason.startswith("id_exhaustion:") and reason != ID_EXHAUSTION_REASON:
+        return (f"id_exhaustion Reason must be exactly "
+                f"{ID_EXHAUSTION_REASON!r}")
+    return None
+
+
 def typed_shard_footer(lint, path, text, stream, recheck=False):
     """Validate the shared typed footer and return (entries, coverage rows).
 
@@ -1113,10 +1143,17 @@ def typed_shard_footer(lint, path, text, stream, recheck=False):
                     lint.fail(
                         f"{path}: {entry['Entry ID']} not_rowed_observation cannot name Register IDs"
                     )
-                if blank_cell(entry["Reason"]) or "\n" in entry["Reason"]:
+                reason = entry["Reason"]
+                if blank_cell(reason) or "\n" in reason:
                     lint.fail(
                         f"{path}: {entry['Entry ID']} not_rowed_observation requires a one-line Reason"
                     )
+                else:
+                    detail = footer_reason_failure(reason)
+                    if detail is not None:
+                        lint.fail(
+                            f"{path}: {entry['Entry ID']} not_rowed_observation {detail}"
+                        )
             entry["_ids"] = ids
             entries.append(entry)
 
