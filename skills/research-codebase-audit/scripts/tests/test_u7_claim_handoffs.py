@@ -1067,7 +1067,10 @@ def test_s706_dual_accept_scores_resolver_valid_handoff(tmp_path):
     assert ("filed_h", "H-0001") in routes
 
 
-def test_b9_exports_and_exactly_lints_handoff_ledger_sheet(tmp_path):
+def test_b9_omits_handoff_ledger_sheet_but_keeps_machine_artifact(tmp_path):
+    """U17 inversion: even with `paper_source_set`, the workbook carries no
+    Handoff ledger sheet, the b9 lint is green without it, and the machine
+    artifact `_run/handoff_ledger.json` survives untouched."""
     root, worklist = prepare_adjudication(tmp_path)
     write_adjudication_verdicts(root, worklist)
     adjudication.apply_done(root, root / "audit", "claims_adjudication")
@@ -1082,21 +1085,20 @@ def test_b9_exports_and_exactly_lints_handoff_ledger_sheet(tmp_path):
     staging.mkdir(exist_ok=True)
     shutil.copy2(audit / "claims_register.md", staging / "claims_register.md")
     shutil.copy2(audit / "code_error_register.md", staging / "code_error_register.md")
+    ledger_path = audit / "_run/handoff_ledger.json"
+    ledger_before = ledger_path.read_bytes()
     result = rb.run_script(
         "export_xlsx.py", "--audit-dir", audit, "--mode", "replication")
     assert result.returncode == 0, result.stdout + result.stderr
     from openpyxl import load_workbook
     workbook = load_workbook(audit / "code_review.xlsx", read_only=True)
-    assert "Handoff ledger" in workbook.sheetnames
+    assert "Handoff ledger" not in workbook.sheetnames
     passed = rb.lint(rb.AuditDir(root), "b9")
     assert passed.returncode == 0, passed.stdout + passed.stderr
-    ledger = json.loads((audit / "_run/handoff_ledger.json").read_text())
-    ledger["H"] = []
-    (audit / "_run/handoff_ledger.json").write_text(
-        json.dumps(ledger, indent=2), encoding="utf-8")
-    failed = rb.lint(rb.AuditDir(root), "b9")
-    assert failed.returncode == 1
-    assert "does not exactly match" in failed.stdout
+    assert ledger_path.is_file()
+    assert ledger_path.read_bytes() == ledger_before
+    ledger = json.loads(ledger_path.read_text())
+    assert ledger.get("H") or ledger.get("X")
 
 
 # ------------------------------------------------------- U7b phase-D repairs

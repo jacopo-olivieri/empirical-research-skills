@@ -90,8 +90,8 @@ defaults and let the user correct.
 6. **Known context.** Anything the user already knows: fragile areas, known issues, restricted
    data, quirks (e.g. mirror folders that are import-only).
 7. **Output preferences and worker model tier** (default: inherit the session model).
-8. **Effort exceptions.** Offer the fixed default map: every dispatch role runs at `high`
-   except `b8_rewriter`, which runs at `medium`. Ask only for exceptions: “name any role you
+8. **Effort exceptions.** Offer the fixed default map: every dispatch role runs at `medium`
+   except `b8_rewriter`, which runs at `low`. Ask only for exceptions: “name any role you
    want moved.” Legal tiers are `low`, `medium`, `high`, `xhigh`, and `max`. The resulting map is
    written once at intake and never edited; changing effort later requires a fresh run.
 9. **Launch requirements.** A long run is certainly interrupted, so check two things before
@@ -124,17 +124,17 @@ Write `audit/_run/manifest.json`:
   "output_prefs": "…",
   "worker_model": "inherit",
   "effort_map": {
-    "codemap": "high",
-    "claims_b1_planner": "high", "claims_b2_section": "high",
-    "claims_b3_merge": "high", "claims_b3c_conventions": "high",
-    "claims_b3b_second_read": "high", "claims_b3b_merge": "high",
-    "claims_adjudication": "high", "claims_adjudication_lineage": "high",
-    "claims_b5_recheck_cluster": "high", "claims_b6_merge": "high",
-    "code_b1_planner": "high", "code_b2_chunk": "high", "code_b3_merge": "high",
-    "b3d_conventions_scan": "high", "code_b3b_second_read": "high",
-    "code_b3b_merge": "high", "code_b5_recheck_cluster": "high",
-    "code_b6_merge": "high", "b7_cross_linker": "high",
-    "b7_claim_recheck": "high", "b8_rewriter": "medium"
+    "codemap": "medium",
+    "claims_b1_planner": "medium", "claims_b2_section": "medium",
+    "claims_b3_merge": "medium", "claims_b3c_conventions": "medium",
+    "claims_b3b_second_read": "medium", "claims_b3b_merge": "medium",
+    "claims_adjudication": "medium", "claims_adjudication_lineage": "medium",
+    "claims_b5_recheck_cluster": "medium", "claims_b6_merge": "medium",
+    "code_b1_planner": "medium", "code_b2_chunk": "medium", "code_b3_merge": "medium",
+    "b3d_conventions_scan": "medium", "code_b3b_second_read": "medium",
+    "code_b3b_merge": "medium", "code_b5_recheck_cluster": "medium",
+    "code_b6_merge": "medium", "b7_cross_linker": "medium",
+    "b7_claim_recheck": "medium", "b8_rewriter": "low"
   },
   "review_mode_sentence": "…",
   "paper_source_path": "<root .tex or single paper source>",
@@ -303,28 +303,28 @@ files carries exactly one of these keys; b4 is conductor-computed and has no pla
 
 | Role key | Stage / assignment | Default effort |
 | --- | --- | --- |
-| `codemap` | b0 CODEMAP | high |
-| `claims_b1_planner` | claims b1 planner | high |
-| `claims_b2_section` | claims b2 section worker | high |
-| `claims_b3_merge` | claims b3 first merge | high |
-| `claims_b3c_conventions` | claims b3c consolidation | high |
-| `claims_b3b_second_read` | claims b3b second read | high |
-| `claims_b3b_merge` | claims b3b merge | high |
-| `claims_adjudication` | claims H/X capture adjudicator | high |
-| `claims_adjudication_lineage` | claims final-carrier lineage adjudicator | high |
-| `claims_b5_recheck_cluster` | claims b5 recheck cluster | high |
-| `claims_b6_merge` | claims b6a/b6b merge | high |
-| `code_b1_planner` | code b1 planner | high |
-| `code_b2_chunk` | code b2 chunk worker | high |
-| `code_b3_merge` | code b3 first merge | high |
-| `b3d_conventions_scan` | code b3d conventions scan | high |
-| `code_b3b_second_read` | code b3b second read | high |
-| `code_b3b_merge` | code b3b merge | high |
-| `code_b5_recheck_cluster` | code b5 recheck cluster | high |
-| `code_b6_merge` | code b6a/b6b merge | high |
-| `b7_cross_linker` | b7 cross-link | high |
-| `b7_claim_recheck` | b7 conditional claims recheck | high |
-| `b8_rewriter` | b8 rewrite | medium |
+| `codemap` | b0 CODEMAP | medium |
+| `claims_b1_planner` | claims b1 planner | medium |
+| `claims_b2_section` | claims b2 section worker | medium |
+| `claims_b3_merge` | claims b3 first merge | medium |
+| `claims_b3c_conventions` | claims b3c consolidation | medium |
+| `claims_b3b_second_read` | claims b3b second read | medium |
+| `claims_b3b_merge` | claims b3b merge | medium |
+| `claims_adjudication` | claims H/X capture adjudicator | medium |
+| `claims_adjudication_lineage` | claims final-carrier lineage adjudicator | medium |
+| `claims_b5_recheck_cluster` | claims b5 recheck cluster | medium |
+| `claims_b6_merge` | claims b6a/b6b merge | medium |
+| `code_b1_planner` | code b1 planner | medium |
+| `code_b2_chunk` | code b2 chunk worker | medium |
+| `code_b3_merge` | code b3 first merge | medium |
+| `b3d_conventions_scan` | code b3d conventions scan | medium |
+| `code_b3b_second_read` | code b3b second read | medium |
+| `code_b3b_merge` | code b3b merge | medium |
+| `code_b5_recheck_cluster` | code b5 recheck cluster | medium |
+| `code_b6_merge` | code b6a/b6b merge | medium |
+| `b7_cross_linker` | b7 cross-link | medium |
+| `b7_claim_recheck` | b7 conditional claims recheck | medium |
+| `b8_rewriter` | b8 rewrite | low |
 
 ## Phase 4 — Report and follow-up (interactive again)
 

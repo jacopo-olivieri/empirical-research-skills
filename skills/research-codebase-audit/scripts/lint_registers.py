@@ -5753,15 +5753,24 @@ def stage_b8(lint, audit, manifest):
             )
 
 
+# The b9 lint's own independent mirror of the Paper Claims register columns the
+# export omits from the sheet. export_xlsx.py carries its own copy
+# (CLAIMS_HIDDEN_COLS); the two lists are deliberately never shared — a shared
+# constant would blind the parity check to exactly the drift it exists to catch.
+B9_CLAIMS_HIDDEN_COLS = ("Used in Text", "Output IDs", "Blocked Check")
+
+
 def export_expected_headers(reg_headers, add_potential_issue):
     """The header row export_xlsx.py writes for a sheet, from the register's own
-    headers. Mirrors export_xlsx.drop_and_augment: drop every `*Original` column
-    (order preserved), then — on Paper Claims — insert `Potential Issue` right
-    after `Status`."""
+    headers. Mirrors export_xlsx: drop every `*Original` column (order
+    preserved), then — on Paper Claims — insert `Potential Issue` right after
+    `Status` and omit the lint's own hidden-column mirror, leaving the 11
+    visible columns in register order."""
     keep = [h for h in reg_headers if not h.endswith("Original")]
     if add_potential_issue and "Status" in keep:
         keep = list(keep)
         keep.insert(keep.index("Status") + 1, "Potential Issue")
+        keep = [h for h in keep if h not in B9_CLAIMS_HIDDEN_COLS]
     return keep
 
 
@@ -5800,50 +5809,10 @@ def stage_b9(lint, audit, manifest):
             _token_register_rows(lint, audit / "code_error_register.md"),
             FINAL_TOKEN_RECEIPT_HOMES,
         )
-    expect = {
-        "Overview", "Code Errors", "Late observations (unverified)",
-        "Late observation coverage",
-    } | ({"Paper Claims"} if mode == "replication" else set())
-    if mode == "replication" and (manifest or {}).get("paper_source_set"):
-        expect.add("Handoff ledger")
+    expect = {"Overview", "Code Errors"} | (
+        {"Paper Claims"} if mode == "replication" else set())
     if set(wb.sheetnames) != expect:
         lint.fail(f"workbook sheets {wb.sheetnames} != expected {sorted(expect)}")
-    if "Handoff ledger" in expect and "Handoff ledger" in wb.sheetnames:
-        ledger_path = audit / "_run/handoff_ledger.json"
-        try:
-            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            lint.fail(f"{ledger_path}: cannot verify exported handoff ledger ({exc})")
-            ledger = {"H": [], "X": []}
-        columns = [
-            "Obligation ID", "Kind", "Source Shard", "Anchor",
-            "Destination Worker", "Terminal State", "Covering Claim ID",
-            "Disposition",
-        ]
-        expected_rows = []
-        for entry in sorted(ledger.get("H", []) + ledger.get("X", []),
-                            key=lambda row: row.get("id", "")):
-            disposition = entry.get("disposition") or {}
-            anchor = entry.get("anchor", "")
-            if isinstance(anchor, dict):
-                end = anchor.get("end_line", anchor.get("start_line", ""))
-                lines = (str(anchor.get("start_line", ""))
-                         if end == anchor.get("start_line")
-                         else f"{anchor.get('start_line', '')}-{end}")
-                anchor = f"{anchor.get('source_path', '')}:{lines}"
-            expected_rows.append([
-                str(entry.get("id", "")), str(entry.get("kind", "")),
-                str(entry.get("source_shard", "")), str(anchor),
-                str(entry.get("destination_worker", "")), str(entry.get("state", "")),
-                str(entry.get("covering_c_id") or ""),
-                str(disposition.get("reason", "")),
-            ])
-        data = list(wb["Handoff ledger"].values)
-        actual_headers = [str(value) if value is not None else "" for value in data[0]] if data else []
-        actual_rows = [[str(value) if value is not None else "" for value in row]
-                       for row in data[1:]] if data else []
-        if actual_headers != columns or actual_rows != expected_rows:
-            lint.fail("Handoff ledger: sheet does not exactly match handoff_ledger.json")
     # U8 (d): the frozen b8 staging registers must still be present and non-empty.
     check_staging_frozen(lint, audit, mode)
     checks = [("Code Errors", "code_error_register.md", ERROR_COLS, "Error ID", ["Error Description", "Why It Matters"])]
@@ -5897,33 +5866,6 @@ def stage_b9(lint, audit, manifest):
                     lint.fail(f"{sheet}: {r[id_j]} Potential Issue '{pi}' disagrees with "
                               f"Severity ('{sev}'): must be '{expected}' "
                               f"(Potential Issue = TRUE iff Severity non-empty)")
-    expected_lo = []
-    streams = ("claims", "code") if mode == "replication" else ("code",)
-    for stream in streams:
-        artifact = audit / f"late_observations_{stream}.md"
-        b6b_state = manifest.get("stages", {}).get(
-            f"{stream}_b6b", {}).get("status")
-        if b6b_state == "blocked" and not artifact.is_file():
-            # Blocked collection is represented on the coverage surface; it
-            # is never silently converted into a zero-observation artifact.
-            continue
-        # Pending dispositions are legal at b9: the export publishes them on
-        # the explicitly unverified sheet.  The completion-report gate lives
-        # on `certify_stage.py close-run`, after the Phase-4 first batch.
-        _path, rows, _dispositions = _late_observation_rows(lint, audit, stream)
-        expected_lo.extend([[stream] + [row[column] for column in LO_COLS]
-                            for row in rows])
-    expected_lo.sort(key=lambda row: row[1])
-    lo_sheet = "Late observations (unverified)"
-    if lo_sheet in wb.sheetnames:
-        data = list(wb[lo_sheet].values)
-        headers = [str(value) if value is not None else "" for value in data[0]] if data else []
-        actual = [[str(value) if value is not None else "" for value in row]
-                  for row in data[1:]] if data else []
-        if headers != ["Stream"] + LO_COLS:
-            lint.fail(f"{lo_sheet}: wrong headers {headers}")
-        if actual != expected_lo:
-            lint.fail(f"{lo_sheet}: rows do not exactly equal stable LO aggregation")
     coverage_path = audit / "_run/late_observation_coverage.md"
     coverage_text = read_text(lint, coverage_path) or ""
     coverage_rows = tables_by_cols(
@@ -5951,20 +5893,6 @@ def stage_b9(lint, audit, manifest):
         })
     if coverage_rows != expected_coverage:
         lint.fail(f"{coverage_path}: coverage cells do not derive exactly from manifest state")
-    coverage_sheet = "Late observation coverage"
-    if coverage_sheet in wb.sheetnames:
-        data = list(wb[coverage_sheet].values)
-        headers = [str(value) if value is not None else "" for value in data[0]] if data else []
-        actual = [[str(value) if value is not None else "" for value in row]
-                  for row in data[1:]] if data else []
-        expected_headers = [
-            "Stream", "Required", "b6b State", "Collection State", "Artifact Head",
-            "Blocker Evidence IDs",
-        ]
-        expected_values = [[row[column] for column in expected_headers]
-                           for row in expected_coverage]
-        if headers != expected_headers or actual != expected_values:
-            lint.fail(f"{coverage_sheet}: sheet does not match derived coverage artifact")
 
 
 # --------------------------------------------------------------- main

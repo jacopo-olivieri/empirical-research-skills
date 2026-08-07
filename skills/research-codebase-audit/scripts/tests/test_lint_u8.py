@@ -12,7 +12,10 @@ Four families of new checks, each a negative/positive pair:
       and the populated-``_staging/`` requirement.
 """
 
+import json
+
 import openpyxl
+import pytest
 
 import regbuild as rb
 
@@ -405,3 +408,90 @@ def test_b9_red_on_empty_staging(tmp_path):
     res = rb.lint(a, "b9")
     assert res.returncode == 1
     assert "_staging" in res.stdout or "staging" in res.stdout.lower()
+
+
+# ------------------------------------------------ (d) U17 slimmed sheet set
+
+
+def _u17_claims():
+    """Fresh U17 fixture domain: a synthetic municipal bike-share study."""
+    return [
+        rb.claims_row("C-0701", quote="Ridership rises 12% on dry days",
+                      text="the dry-day coefficient in the ridership regression is 0.12",
+                      source="`code/ridership_model.R`", status="confirmed"),
+        rb.claims_row("C-0702", quote="All 214 docking stations enter the panel",
+                      text="the station panel covers every docking station",
+                      source="`code/station_counts.py`", status="inconsistent",
+                      severity="3", issue="six stations are dropped by the weather merge"),
+    ]
+
+
+def _u17_errors():
+    return [rb.error_row(
+        "E-0701", source="`code/station_counts.py`",
+        location="`code/station_counts.py:41`", status="confirmed", severity="2",
+        desc="docking-station counts are summed before the weather merge",
+        why="rain-day ridership is overstated in the pooled sample")]
+
+
+@pytest.mark.u17
+def test_b9_red_on_stray_fourth_sheet(tmp_path):
+    """Test 1: a workbook with any sheet beyond the slimmed set FAILS."""
+    a = rb.make_b9(tmp_path, claims_rows=_u17_claims(), error_rows=_u17_errors())
+    wb_path = a.audit / "code_review.xlsx"
+    wb = openpyxl.load_workbook(wb_path)
+    wb.create_sheet("Handoff ledger")
+    wb.save(wb_path)
+    res = rb.lint(a, "b9")
+    assert fails(res, "workbook sheets")
+
+
+@pytest.mark.u17
+def test_b9_red_on_reinserted_hidden_column(tmp_path):
+    """Test 1: hand-inserting `Used in Text` back into Paper Claims FAILS
+    header parity against the lint's own hidden-column mirror."""
+    a = rb.make_b9(tmp_path, claims_rows=_u17_claims(), error_rows=_u17_errors())
+    wb_path = a.audit / "code_review.xlsx"
+    wb = openpyxl.load_workbook(wb_path)
+    ws = wb["Paper Claims"]
+    ws.insert_cols(4)
+    ws.cell(row=1, column=4, value="Used in Text")
+    for r in range(2, ws.max_row + 1):
+        ws.cell(row=r, column=4, value="TRUE")
+    wb.save(wb_path)
+    res = rb.lint(a, "b9")
+    assert res.returncode == 1
+    assert "header parity" in res.stdout
+
+
+@pytest.mark.u17
+def test_b9_green_on_actual_export_in_both_modes(tmp_path):
+    """Test 2: the lint is green on the exporter's real output, both modes."""
+    a = rb.make_b9(tmp_path / "replication", claims_rows=_u17_claims(),
+                   error_rows=_u17_errors())
+    res = rb.lint(a, "b9")
+    assert res.returncode == 0, res.stdout + res.stderr
+    b = rb.make_b9(tmp_path / "code-only", error_rows=_u17_errors(),
+                   mode="code_errors_only")
+    res = rb.lint(b, "b9")
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+@pytest.mark.u17
+def test_b9_green_without_ledger_sheet_on_paper_source_set_manifest(tmp_path):
+    """Test 2 (the old test's inversion): `paper_source_set` no longer brings
+    the Handoff ledger sheet back, and the lint is green without it."""
+    a = rb.make_b9(tmp_path, claims_rows=_u17_claims(), error_rows=_u17_errors())
+    manifest = json.loads((a.audit / "_run/manifest.json").read_text())
+    manifest["paper_source_set"] = [{"source_path": "paper/main.tex"}]
+    (a.audit / "_run/manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+    a.write("_run/handoff_ledger.json", json.dumps({"H": [], "X": []}))
+    regenerated = rb.run_script(
+        "export_xlsx.py", "--audit-dir", a.audit,
+        "--mode", "replication", "-o", a.audit / "code_review.xlsx")
+    assert regenerated.returncode == 0, regenerated.stdout + regenerated.stderr
+    wb = openpyxl.load_workbook(a.audit / "code_review.xlsx", read_only=True)
+    assert "Handoff ledger" not in wb.sheetnames
+    res = rb.lint(a, "b9")
+    assert res.returncode == 0, res.stdout + res.stderr

@@ -622,15 +622,19 @@ def test_dispatch_role_table_defaults_and_carriers_cover_expected_stage_role_sit
     assert observed_sites == expected_sites
     dispatch_roles = [role for (_stage, role) in observed_sites]
     skill = (rb.SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    table_roles = re.findall(
-        r"(?m)^\| `([a-z0-9_]+)` \| .* \| (?:low|medium|high|xhigh|max) \|$",
+    table_pairs = re.findall(
+        r"(?m)^\| `([a-z0-9_]+)` \| .* \| (low|medium|high|xhigh|max) \|$",
         skill,
     )
+    table_roles = [role for role, _tier in table_pairs]
     assert set(dispatch_roles) == set(table_roles) == set(dispatch.ROLE_KEYS)
     assert set(dispatch.DEFAULT_EFFORT_MAP) == set(dispatch.ROLE_KEYS)
     assert set(dispatch.DEFAULT_EFFORT_MAP.values()) <= set(dispatch.EFFORT_TIERS)
-    assert dispatch.DEFAULT_EFFORT_MAP["b8_rewriter"] == "medium"
-    assert all(tier == "high" for role, tier in dispatch.DEFAULT_EFFORT_MAP.items()
+    # U17: the role-key table's effort values are compared to the code map by
+    # value, not just validated as legal tiers.
+    assert dict(table_pairs) == dispatch.DEFAULT_EFFORT_MAP
+    assert dispatch.DEFAULT_EFFORT_MAP["b8_rewriter"] == "low"
+    assert all(tier == "medium" for role, tier in dispatch.DEFAULT_EFFORT_MAP.items()
                if role != "b8_rewriter")
 
     carriers = sorted((rb.SKILL_DIR / "agents/claude").glob("rca-carrier-*.md"))
@@ -645,6 +649,21 @@ def test_dispatch_role_table_defaults_and_carriers_cover_expected_stage_role_sit
     assert observed == {f"rca-carrier-{tier}": tier for tier in dispatch.EFFORT_TIERS}
     linker = (rb.SKILL_DIR.parents[1] / "scripts/link-skills.sh").read_text()
     assert "*/agents/claude/*.md" in linker
+
+
+@pytest.mark.u17
+def test_skill_manifest_template_effort_values_match_default_map():
+    """U17 lockstep extension: the SKILL.md manifest template's effort_map is
+    compared to DEFAULT_EFFORT_MAP by value. Regex extraction of the braced
+    block, not json.loads of the whole fence — the template is a documentation
+    sketch and is not guaranteed to stay valid JSON. Exactly one effort_map
+    block must exist: zero or two would let the extraction silently match
+    nothing (or the wrong block)."""
+    skill = (rb.SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"\"effort_map\"\s*:\s*\{([^{}]*)\}", skill)
+    assert len(blocks) == 1, f"expected exactly one effort_map block, found {len(blocks)}"
+    parsed = dict(re.findall(r"\"([a-z0-9_]+)\"\s*:\s*\"([a-z]+)\"", blocks[0]))
+    assert parsed == dispatch.DEFAULT_EFFORT_MAP
 
 
 def test_conventions_scan_worker_contract_is_generated(tmp_path):

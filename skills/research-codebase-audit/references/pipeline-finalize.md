@@ -6,8 +6,8 @@ Runs after both streams (or the only stream) reach `done`/`blocked` at b6b.
 
 | Mode | b7 cross-link | severity-token rulings | b8 rewrite | b9 export |
 | --- | --- | --- | --- | --- |
-| Full replication | yes | yes | both registers | Overview + Paper Claims + Code Errors + both late-observation sheets |
-| Code-errors-only | **skip** (no claims register) | **skip by stage-tuple omission** | code register only | Overview + Code Errors + both late-observation sheets |
+| Full replication | yes | yes | both registers | Overview + Paper Claims + Code Errors |
+| Code-errors-only | **skip** (no claims register) | **skip by stage-tuple omission** | code register only | Overview + Code Errors |
 
 A stream that ended with blocked stages still finalizes: blocked rows carry their status into
 the export; blocked *stages* are listed in the final report, and cross-link runs on whatever
@@ -145,14 +145,16 @@ or a doctored/non-live uphold produces zero promotion. Do not start b8 until thi
    export; demote and rerun stale stages before trying b9 again.
 2. Run `scripts/export_xlsx.py --audit-dir audit/ --manifest audit/_run/manifest.json
    --mode <mode>` → `audit/code_review.xlsx`.
-   - Sheets per the mode table above; `Overview` carries the sheet guide, status legends,
+   - Sheets per the mode table above — the workbook is author-facing only: exactly
+     Overview + Paper Claims + Code Errors in full replication, Overview + Code Errors in
+     code-errors-only. `Overview` carries the sheet guide, status legends,
      variable legends, and a **Degraded-confidence warnings** section from the manifest
      `warnings` (CODEMAP preconditions score).
    - Author-facing columns in; every `*_Original` column out; `Potential Issue` computed on
-     the Paper Claims sheet only.
-   - Full-replication paper runs include `Handoff ledger`, an exact publication
-     of every H/X entry's terminal state, carrier, and disposition.
-   - `audit/_run/late_observation_coverage.md` and the two workbook sheets derive from the b6b
+     the Paper Claims sheet only. The Paper Claims sheet additionally omits the register's
+     `Used in Text`, `Output IDs`, and `Blocked Check` columns (11 visible columns; the
+     register keeps all 13). Code Errors keeps all 9 columns, one shape in both modes.
+   - `audit/_run/late_observation_coverage.md` still derives from the b6b
      artifacts and manifest. `Artifact Head` / `Blocker Evidence IDs` are the explicit-absence
      values `not recorded` / `none recorded`; a blocked b6b reports degraded coverage.
 3. `lint_registers.py --stage b9`: workbook opens; per-sheet row counts and ID sets match the
@@ -164,7 +166,8 @@ or a doctored/non-live uphold produces zero promotion. Do not start b8 until thi
 Return to SKILL.md for the single `close-run` instruction, then Phase 4 (report + targeted manual
 QA follow-up). `close-run` is the completion-report gate: with late observations recorded, it
 refuses until the first Phase-4 disposition batch replaces every `pending` state (b9 itself
-exports pending rows on the unverified sheet without refusing). In a full-replication U7 run it
+accepts pending dispositions without refusing — the rows remain in the
+`late_observations_<stream>.md` collection artifacts). In a full-replication U7 run it
 re-derives both worklists and verdict joins and refuses if either adjudication
 stage is pending or absent, an H/X state is not final-passable, a disposition
 is raw, lineage equivalence was refused, or a `blocked_fallback` lacks an exact
