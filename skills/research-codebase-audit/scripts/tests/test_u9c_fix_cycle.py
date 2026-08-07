@@ -473,7 +473,7 @@ def test_tier1_stage_era_b0_survives_tail_and_tamper_refuses_both_commands(
                 "C-0001", status="unclear", severity="2",
                 verdict="substantiated")],
         )
-        + rb._shard_footer_text([]),
+        + rb._shard_footer_text([], include_phase=False),
     )
     certify.start_stage(a.root, "claims_b4")
     certify.finish_stage(a.root, "claims_b4", "done")
@@ -1065,6 +1065,9 @@ def _complete_stage_era_tail(tmp_path, ruling="cap", through_b8=True):
             ["OBS-0002", "candidate", "O-0121",
              "output row retained", ""],
         ])
+        # U15: a first-pass shard carries the phase table as its third part.
+        + "\n### Reading phase\n\n"
+        + rb.phase_table_text(["C-0001"] + [row[0] for row in output_rows])
     )
     a.write("_work/w1.md", claims_worker)
     _certify_public(root, "claims_b2", "audit/_work/w1.md")
@@ -1090,6 +1093,8 @@ def _complete_stage_era_tail(tmp_path, ruling="cap", through_b8=True):
             "audit/_work/w1.md#OBS-0001 | candidate:C-0001",
             "audit/_work/w1.md#OBS-0002 | candidate:O-0121",
         ],
+        **rb.report_phase_fields(
+            reading=["C-0001"] + [row[0] for row in output_rows]),
     }))
     _certify_public(root, "claims_b3")
 

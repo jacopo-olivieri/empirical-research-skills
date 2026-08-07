@@ -319,6 +319,11 @@ inspection) also satisfy the principle. The recheck stage already runs synthetic
 defensively, to refute an existing suspicion; this rule extends the same capability to
 discovery.
 
+**Probing is phase two.** In first-pass and second-read roles, complete the full read of the
+assigned scope and row every reading-found candidate before the first probe; a probe may add
+rows and evidence, never remove or downgrade a phase-one row. (This role scope leaves the
+recheck unbound — its whole job is probing rows already found.)
+
 **Ladder condition.** The probe applies at any review-ladder level where running a small
 isolated fragment is permitted within budget (evidence level `synthetic_test_verified`,
 ladder level ≥ 2, per the review mode). Where execution is off-limits, the principle degrades
@@ -1181,13 +1186,37 @@ bC severe mint; no bC-qualified rulings stage exists.
     legal label: every suspected defect is a register row, however uncertain, and a decision
     that an error cannot occur is itself a candidate row, never a note. Confidence belongs in
     Status/evidence, not prose.
+  - **Phase table** — exactly one table `| Phase | Register IDs |` with exactly two rows, in
+    order `found_by_reading` then `found_by_probe`, each cell a `;`-separated ID list (blank =
+    empty). The two lists **partition** the shard's own row IDs: every row in exactly one
+    list, none in both, none listed that is not a shard row. Partition only — the lint never
+    judges the two counts, so an all-reading and an all-probe shard both pass. A role with no
+    probe allowance lists every row under `found_by_reading`.
+- **Block-coverage table (second read only, both streams)** — a second-read shard also
+  carries exactly one table `| Scope | Block Lines | Purpose | Outcome |`, one row per natural
+  block of each readable assigned scope. `Scope` is that backticked repo-relative file (code:
+  a script from the allocation's Script Scope; claims: a paper file named by a span token in
+  its `File/Section Scope`); `Block Lines` is `<start>–<end>`, 1-based inclusive; `Purpose` is
+  one line of free prose naming the block (imports/setup, data load, transform, output, …) —
+  no vocabulary, no taxonomy, because the duty is over WHERE attention goes, never WHAT to
+  look for; `Outcome` is exactly `clean` or `findings: <IDs>` (blocking is scope-level, so
+  there is no block-level `blocked:`). The b3b shard lint and the b3b merge lint both prove
+  the blocks of each readable scope tile it with no gap and no overlap and reach its
+  extent — code: line 1 to the file's actual last line; claims: each conductor-declared span,
+  endpoint to endpoint, every declared span anchored separately. A scope recorded `blocked: <reason>` (code) or declared `blocked:` in
+  the allocation cell (claims) carries **zero** block rows and is excluded; every readable
+  scope carries at least one. Every cited ID must be a shard row; per code scope the block
+  `findings` union equals that scope's `| Script | Outcome |` findings, and for claims the
+  union equals every shard C row except those cited by a resolved handoff row (O IDs exempt).
 - **Blocked-shard marker**: a shard is blocked when the conductor records it blocked with
   `certify_stage.py set-shard`; ID-range exhaustion is represented by a typed
   `not_rowed_observation` whose reason is exactly `id_exhaustion: ID range exhausted` and
   triggers that conductor action.
 - Recheck shards contain the single row-level ledger specified above, plus files inspected,
   commands run, a cluster summary, and the typed footer. The same contract applies under the two
-  supplementary shard directories.
+  supplementary shard directories. A recheck shard carries **no** phase table and no
+  block-coverage table: those duties bind the first-pass and second-read roles that mint rows,
+  and the recheck is a precision pass on rows already found.
 
 ### Shard write-up rules (consulted at write-up, not while reading)
 
@@ -1213,10 +1242,14 @@ catches after the fact does not need to occupy a worker's attention while readin
 5. **Cross-link columns stay blank** — `Related Claim IDs` / `Related Error IDs` are filled
    only at the cross-link stage; the b2 lint fails a non-empty cell.
 6. **Repo-relative paths** in every path column; the lint fails absolute paths.
-7. **Two-part footer** — coverage table/note (code shards: exact table
+7. **Three-part footer** — coverage table/note (code shards: exact table
    `| Script | Outcome |`, one row per script in scope, where Outcome is exactly `clean`,
-   `findings: <IDs>`, or `blocked: <reason>`), then the exact typed-observations table above.
-   The b2/b3b shard lint requires both parts. At b3/b3b the merge report carries a top-level
+   `findings: <IDs>`, or `blocked: <reason>`), then the exact typed-observations table above,
+   then the exact phase table above. The b2/b3b shard lint requires all three parts. A
+   **second-read** shard additionally carries the block-coverage table above, so a b3b shard
+   is three-part-plus-block; the b3b shard lint and the b3b merge lint both re-run the full
+   block validator (grammar, gap, extent, and outcome consistency).
+   At b3/b3b the merge report carries a top-level
    `footer_dispositions` list with one line per typed entry, serialized exactly as
    `audit/path/to/shard.md#OBS-0001 | candidate:E-0123` or
    `audit/path/to/shard.md#OBS-0001 | dismissed:<one-line reason>`. The merge lint proves a
@@ -1227,6 +1260,12 @@ catches after the fact does not need to occupy a worker's attention while readin
    outcome unless its owning shard is manifest-blocked, in which case it must appear in the
    report's top-level `unreviewed_files` list. The reserved package-wide hygiene-lens key is
    `@hygiene:data-and-log-lens`, exactly once in the hygiene shard.
+   Both merges also carry `phase_partition`
+   (`{"found_by_reading": [...], "found_by_probe": [...]}`), the exact union of the
+   non-blocked shards' phase lists; the b3b merges also carry `block_coverage`
+   (`{"blocks_covered": N, "blocks_clean": N}`), the total and `clean` block-row counts. The
+   merge lint proves both by identity against shard evidence and nothing more — no gate or
+   threshold reads them. b3 carries no `block_coverage`: the block duty is second-read only.
 
 ## Rewrite-pass columns
 

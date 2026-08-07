@@ -112,7 +112,9 @@ b3, before the recheck plan (b4), so the new rows flow into the recheck automati
    certification obligation verifies — write the plan with a header-only allocation table,
    snapshot both registers to `audit/_run/snapshots/claims_b3b/`, and write a zero-work
    `audit/_run/merge_report_claims_b3b.json` (both register entries
-   `{"shard_rows": 0, "dedup_removed": 0, "added": 0}` plus `"footer_dispositions": []`), run
+   `{"shard_rows": 0, "dedup_removed": 0, "added": 0}` plus `"footer_dispositions": []`,
+   `"phase_partition": {"found_by_reading": [], "found_by_probe": []}` and
+   `"block_coverage": {"blocks_covered": 0, "blocks_clean": 0}`), run
    `build_handoff_ledger.py <package-root> --audit-dir audit --stage claims_b3b`, then
    certify `claims_b3b` done via
    `certify_stage.py finish --stage claims_b3b --outcome done` against the canonical registers
@@ -122,7 +124,16 @@ b3, before the recheck plan (b4), so the new rows flow into the recheck automati
    Range | Output ID Range | Reason | Known Findings | Assigned Handoff IDs |` (use the header
    `Shard File` exactly — the b3b lint requires it — and put each shard path, under
    `audit/_work_second_read/`, in the cell). Reason is `flagged` for ordinary recall;
-   `handoff` is used for a scope selected only by forwarded work. `Assigned Handoff IDs` is
+   `handoff` is used for a scope selected only by forwarded work. Every `File/Section Scope`
+   cell also carries a machine-readable **span declaration** beside its prose: one or more
+   `;`-separated tokens `` `<paper source path>:<start>–<end>` `` (repo-relative, 1-based
+   inclusive lines) naming exactly the lines the worker must cover, with any off-limits span
+   written `blocked: <path>:<start>–<end> — <reason>`. One cell may declare several spans of
+   the same file; each is anchored independently, so none can hide behind a covered sibling.
+   A path may not be declared both readable and blocked. The b3b lint anchors the worker's
+   block-coverage table to these spans endpoint to endpoint, and a cell with no parseable
+   span token fails the lint, so declare the span even when the prose already names the
+   section. `Assigned Handoff IDs` is
    `—` or a comma-separated allocation and exactly covers every `forwarded` H-ID once across
    the plan. Ranges
    are fresh and globally disjoint from every b1 range and both merge-coordinator ranges. `Known

@@ -78,6 +78,11 @@ Also run the three **standing self-consistency checks** defined in `audit/audit_
   writes is exactly where the next reads (path, name, shape).
 <!-- RESTATEMENT:standing-checks END -->
 
+**Work in two phases.** Phase one: read your full scope and write every candidate row that
+reading finds, plus the coverage table. Phase two: only then run the probes the contract
+allows. A probe may add rows and evidence; it may never delete or downgrade a phase-one row.
+Record each row's phase in the footer's phase table.
+
 **Empirical probe — establish behavior, do not infer it.** Follow the **Empirical verification**
 rules in `{CONTRACT_PATH}`, which define which fragments qualify (a structural trigger keyed
 to comment- or docstring-asserted behavior, not a felt suspicion), the per-worker probe cap, and
@@ -143,7 +148,7 @@ Exclude:
 Completion criterion — exhaustive: every script in your scope appears in the shard's coverage
 table. At write-up, follow the **Shard write-up rules** checklist in `{CONTRACT_PATH}`
 (Shard format section) — exact canonical columns and vocabulary, IDs from your assigned range,
-row completeness, blank cross-link column, repo-relative paths, two-part footer (coverage
-table + typed observations) — each enforced by the shard lint, so it needs your attention when
+row completeness, blank cross-link column, repo-relative paths, three-part footer (coverage
+table + typed observations + phase table) — each enforced by the shard lint, so it needs your attention when
 writing up findings, not while reading.
 ```

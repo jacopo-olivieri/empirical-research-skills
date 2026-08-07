@@ -46,3 +46,6 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "u14: unit U14 — register lints and severity (the closed "
         "footer reason vocabulary and the severity-4 target-type join)")
+    config.addinivalue_line(
+        "markers", "u15: unit U15 — the open-reading budget protection policy "
+        "(phase-note partition and second-read block coverage)")

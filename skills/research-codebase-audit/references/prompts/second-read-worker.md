@@ -58,6 +58,11 @@ Examine every path derivation and relative call in files listed as
 unparsed in audit/_run/path_derivation_bundles.md: does each resolve
 correctly under the package's documented invocation?
 
+**Work in two phases.** Phase one: read your full scope and write every candidate row that
+reading finds, plus the coverage note/table and block-coverage table. Phase two: only then run
+the probes the contract allows. A probe may add rows and evidence; it may never delete or
+downgrade a phase-one row. Record each row's phase in the footer's phase table.
+
 **Empirical probe — establish behavior, do not infer it.** Follow the **Empirical verification**
 rules in `{CONTRACT_PATH}`, which define which fragments qualify (a structural trigger keyed
 to comment- or docstring-asserted behavior, not a felt suspicion), the per-worker probe cap, and
@@ -119,8 +124,13 @@ Assigned Handoff IDs column is the sole source of resolution work.
 The shard, using the target register's exact canonical columns. For the **claims stream** always
 write **both** tables in order — the claims table first, then the outputs table — and use an
 empty (header-only) outputs table when you found no new output rows; for the **code stream** write
-the single code-error table. Then the two-part footer per `{CONTRACT_PATH}` — a coverage
-note/table stating what you re-read and the exact typed-observations table. Every suspected
+the single code-error table. Then the three-part footer per `{CONTRACT_PATH}` — a coverage
+note/table stating what you re-read, the exact typed-observations table, and the exact phase
+table partitioning your rows into `found_by_reading` / `found_by_probe` — plus the exact
+block-coverage table `| Scope | Block Lines | Purpose | Outcome |`: divide each readable
+assigned scope into its natural blocks (imports/setup, data loads, transforms, outputs) and
+write one line per block, gap-free and covering the scope end to end. A scope you recorded
+`blocked:` carries no block rows. Every suspected
 defect named in the footer has a candidate register row; `not_rowed_observation` is only for a
 genuine non-defect and requires its one-line reason.
 That Reason must use one of exactly three labels — `tooling: …`, `scope: …`, or the exact

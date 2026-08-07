@@ -83,7 +83,8 @@ def _b3b_manifest_boundary(tmp_path, stream, *, workers,
         )
         if workers:
             plan += (
-                "| W1 | sec 4 | `audit/_work_second_read/w1.md` | "
+                f"| W1 | sec 4 — `{rb.CLAIMS_SPAN_PATH}:{rb.CLAIMS_SPAN[0]}–"
+                f"{rb.CLAIMS_SPAN[1]}` | `audit/_work_second_read/w1.md` | "
                 "C-2000–C-2099 | O-2000–O-2099 | flagged | C-0142 | — |\n"
             )
         a.write("plans/claims_second_read_plan.md", plan)
@@ -99,6 +100,8 @@ def _b3b_manifest_boundary(tmp_path, stream, *, workers,
             for name in files
         }
         report["footer_dispositions"] = []
+        report.update(rb.report_phase_fields(
+            blocks=(1, 1) if (workers and populated_shards) else (0, 0)))
         report_name = "merge_report_claims_b3b.json"
         if workers and populated_shards:
             shard_text = rb.md_table(rb.CLAIMS_COLS, []) + "\n" + rb.md_table(
@@ -106,7 +109,13 @@ def _b3b_manifest_boundary(tmp_path, stream, *, workers,
             shard_text += (
                 "\nCoverage: assigned section fully reread.\n\n"
                 "| Entry ID | Kind | Register IDs | Observation | Reason |\n"
-                "| --- | --- | --- | --- | --- |\n"
+                "| --- | --- | --- | --- | --- |\n\n"
+                + rb.phase_table_text()
+                + "\n"
+                + rb.block_table_text([
+                    (f"`{rb.CLAIMS_SPAN_PATH}`",
+                     f"{rb.CLAIMS_SPAN[0]}–{rb.CLAIMS_SPAN[1]}",
+                     "assigned section", "clean")])
             )
             a.write("_work_second_read/w1.md", shard_text)
     else:
@@ -138,13 +147,21 @@ def _b3b_manifest_boundary(tmp_path, stream, *, workers,
             },
             "footer_dispositions": [],
         }
+        report.update(rb.report_phase_fields(
+            blocks=(1, 1) if (workers and populated_shards) else (0, 0)))
         report_name = "merge_report_code_b3b.json"
         if workers and populated_shards:
+            rb.write_code_scope(a, rb.CODE_SCOPE_PATH, rb.CODE_SCOPE_LINES)
             shard_text = rb.md_table(rb.ERROR_COLS, [])
             shard_text += (
                 "\n| Script | Outcome |\n| --- | --- |\n| `py/x.py` | clean |\n\n"
                 "| Entry ID | Kind | Register IDs | Observation | Reason |\n"
-                "| --- | --- | --- | --- | --- |\n"
+                "| --- | --- | --- | --- | --- |\n\n"
+                + rb.phase_table_text()
+                + "\n"
+                + rb.block_table_text([
+                    (f"`{rb.CODE_SCOPE_PATH}`", f"1–{rb.CODE_SCOPE_LINES}",
+                     "module body", "clean")])
             )
             a.write("_code_errors_second_read/w1.md", shard_text)
     a.snapshot(key, files)

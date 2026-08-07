@@ -104,6 +104,25 @@ def emit_path_derivations(auditdir, *entries):
 # --------------------------------------------------------------- md builders
 
 
+# U15 block-coverage anchors for the shared b3b builders.  The code-stream
+# extent anchor reads the scope file's real line count out of the audited tree,
+# so the synthetic package must actually carry the file; the claims-stream
+# anchor is the conductor-declared span in the allocation cell.
+CODE_SCOPE_PATH = "py/x.py"
+CODE_SCOPE_LINES = 12
+CLAIMS_SPAN_PATH = "paper/section.md"
+CLAIMS_SPAN = (1, 20)
+
+
+def write_code_scope(auditdir, rel, lines):
+    """Write a synthetic package file of exactly *lines* lines."""
+    path = auditdir.root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(f"# synthetic line {n}" for n in range(1, lines + 1))
+    path.write_text(body + "\n", encoding="utf-8")
+    return path
+
+
 def md_table(cols, rows):
     lines = ["| " + " | ".join(cols) + " |",
              "| " + " | ".join(["---"] * len(cols)) + " |"]
@@ -616,7 +635,14 @@ def _auto_recheck(stream, canon_claims, canon_errors):
     return inv, clu
 
 
-def _shard_footer_text(register_ids, *, code=False):
+def _shard_footer_text(register_ids, *, code=False, include_phase,
+                       probe_ids=()):
+    """Render a shard footer.
+
+    ``include_phase`` is explicit and never defaulted: the U15 phase table is a
+    first-pass/second-read obligation, and recheck fixtures must stay
+    phase-free (the recheck lint path neither requires nor forbids it).
+    """
     ids = list(register_ids)
     coverage = (
         f"findings: {'; '.join(ids)}" if code and ids else
@@ -627,6 +653,14 @@ def _shard_footer_text(register_ids, *, code=False):
         [f"OBS-{index:04d}", "candidate", register_id, "row retained", ""]
         for index, register_id in enumerate(ids, start=1)
     ]
+    phase = ""
+    if include_phase:
+        probe = [i for i in ids if i in set(probe_ids)]
+        reading = [i for i in ids if i not in set(probe_ids)]
+        phase = (
+            "\n### Reading phase\n\n"
+            + phase_table_text(reading, probe)
+        )
     return (
         "\n### Coverage\n\n"
         + (md_table(["Script", "Outcome"], [["`py/x.py`", coverage]])
@@ -634,7 +668,32 @@ def _shard_footer_text(register_ids, *, code=False):
         + "\n"
         "### Footer dispositions\n\n"
         + md_table(_lint_mod.FOOTER_COLS, footer_rows)
+        + phase
     )
+
+
+def phase_table_text(reading_ids=(), probe_ids=()):
+    """Render the U15 phase table (partition of the shard's own row IDs)."""
+    return md_table(_lint_mod.PHASE_COLS, [
+        ["found_by_reading", "; ".join(reading_ids) or " "],
+        ["found_by_probe", "; ".join(probe_ids) or " "],
+    ])
+
+
+def report_phase_fields(reading=(), probe=(), *, blocks=None):
+    """The U15 merge-report fields: `phase_partition` and (b3b) `block_coverage`."""
+    fields = {"phase_partition": {"found_by_reading": list(reading),
+                                  "found_by_probe": list(probe)}}
+    if blocks is not None:
+        fields["block_coverage"] = {"blocks_covered": blocks[0],
+                                    "blocks_clean": blocks[1]}
+    return fields
+
+
+def block_table_text(blocks):
+    """Render the U15 block-coverage table from (scope, lines, purpose, outcome)."""
+    return md_table(_lint_mod.BLOCK_COVERAGE_COLS,
+                    [list(block) for block in blocks])
 
 
 def make_b3b_shard(tmp_path, stream, *, claims_rows=(), output_rows=(),
@@ -655,7 +714,8 @@ def make_b3b_shard(tmp_path, stream, *, claims_rows=(), output_rows=(),
             "| Worker ID | File/Section Scope | Shard File | Claim ID Range | "
             "Output ID Range | Reason | Known Findings | Assigned Handoff IDs |\n"
             "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
-            f"| W1 | sec 4 | `audit/{shard_rel}` | {claim_range} | "
+            f"| W1 | sec 4 — `{CLAIMS_SPAN_PATH}:{CLAIMS_SPAN[0]}–{CLAIMS_SPAN[1]}` | "
+            f"`audit/{shard_rel}` | {claim_range} | "
             f"{output_range} | detector | C-0142 |  |\n"
         )
         a.write("plans/claims_second_read_plan.md", plan)
@@ -681,9 +741,25 @@ def make_b3b_shard(tmp_path, stream, *, claims_rows=(), output_rows=(),
         list(claims_rows) + list(output_rows) if stream == "claims"
         else list(error_rows)
     )]
+    if stream == "code":
+        write_code_scope(a, CODE_SCOPE_PATH, CODE_SCOPE_LINES)
+        outcome = (f"findings: {'; '.join(register_ids)}" if register_ids
+                   else "clean")
+        blocks = [(f"`{CODE_SCOPE_PATH}`", f"1–{CODE_SCOPE_LINES}",
+                   "module body", outcome)]
+    else:
+        cids = [row[0] for row in claims_rows]
+        outcome = f"findings: {'; '.join(cids)}" if cids else "clean"
+        blocks = [(f"`{CLAIMS_SPAN_PATH}`",
+                   f"{CLAIMS_SPAN[0]}–{CLAIMS_SPAN[1]}",
+                   "assigned section", outcome)]
     shard = a.write(
         shard_rel,
-        body + _shard_footer_text(register_ids, code=(stream == "code")),
+        body
+        + _shard_footer_text(register_ids, code=(stream == "code"),
+                             include_phase=True)
+        + "\n### Block coverage\n\n"
+        + block_table_text(blocks),
     )
     return a, shard
 
