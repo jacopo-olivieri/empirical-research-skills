@@ -104,7 +104,8 @@ fragment that gives false reassurance is worse than not probing.
   the review mode allows a probe within budget — never a repository script, never a documented
   setup command, never the audited package's data.
 - Use IDs only from your assigned range; if it runs out, stop and add a typed
-  `not_rowed_observation` with reason `ID range exhausted`, then report the block.
+  `not_rowed_observation` with reason exactly `id_exhaustion: ID range exhausted`, then report
+  the block.
 - Leave cross-link columns (`Related Error IDs` / `Related Claim IDs`) blank.
 - Repo-relative paths everywhere.
 
@@ -122,4 +123,10 @@ the single code-error table. Then the two-part footer per `{CONTRACT_PATH}` — 
 note/table stating what you re-read and the exact typed-observations table. Every suspected
 defect named in the footer has a candidate register row; `not_rowed_observation` is only for a
 genuine non-defect and requires its one-line reason.
+That Reason must use one of exactly three labels — `tooling: …`, `scope: …`, or the exact
+string `id_exhaustion: ID range exhausted` — and the shard lint fails anything else. A decision
+that an error cannot occur is itself a candidate register row, never a note. `scope:` refers
+only to the assigned audit task boundary — which files or sections are mine. Any statement
+about the audited program's data, sample, or reachability is a code judgment and must be a
+candidate register row.
 ```

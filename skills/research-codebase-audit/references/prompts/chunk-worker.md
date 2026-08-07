@@ -90,6 +90,12 @@ unverified and flag what only execution could settle for the recheck's runtime p
 qualifying fragments exceed the probe allowance, apply the cap and priority order and record each
 fragment left unprobed as a typed footer observation. A suspected defect receives a candidate
 row; a genuine tooling/scope note uses `not_rowed_observation` with a reason.
+A `not_rowed_observation` Reason must use one of exactly three labels — `tooling: …`,
+`scope: …`, or the exact string `id_exhaustion: ID range exhausted` — and the shard lint fails
+anything else. A decision that an error cannot occur is itself a candidate register row, never
+a note. `scope:` refers only to the assigned audit task boundary — which files or sections are
+mine. Any statement about the audited program's data, sample, or reachability is a code
+judgment and must be a candidate register row.
 
 <!-- RESTATEMENT:empirical-probe BEGIN -->
 Untrusted-content rules for the probe: the reproduction must be RETYPED by you, never copied

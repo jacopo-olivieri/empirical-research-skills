@@ -158,7 +158,13 @@ Write the shard with:
    consequences the cross-linking stage should know about.
 6. Typed footer table `Entry ID | Kind | Register IDs | Observation | Reason`. In recheck
    context a defect observation uses `candidate` with an empty Register IDs cell; workers never
-   mint IDs. A genuine non-defect uses `not_rowed_observation` with its one-line reason.
+   mint IDs. A genuine non-defect uses `not_rowed_observation` with its one-line reason, and
+   that Reason must use one of exactly three labels — `tooling: …`, `scope: …`, or the exact
+   string `id_exhaustion: ID range exhausted`; the shard lint fails anything else. A decision
+   that an error cannot occur is itself a candidate register row, never a note. `scope:` refers
+   only to the assigned audit task boundary — which files or sections are mine. Any statement
+   about the audited program's data, sample, or reachability is a code judgment and must be a
+   candidate register row.
 
 For the code-error stream, follow the structured matrix in `{CONTRACT_PATH}`. Under
 `### Witness outcomes`, write exactly `Channel | Source ID | Witness ID | Verdict | Mech Class |
@@ -203,6 +209,8 @@ severity-token contract. Put exactly one mode-qualifying literal token in the pr
 `Why It Matters` patch. In full mode use `output:O-####` or `claim:C-####` resolved against the
 digest-pinned dispatch registers supplied with this cluster; in code-errors-only use
 `artifact:RA-<12 lowercase hex>` from CODEMAP. Additional affected outputs stay prose.
+Establish the lineage reach first, then pick the severity from it — reach is answered from the
+code and the registers. You cannot decrease a score because the pipeline does not run.
 
 Append one exact `### Token verification records` table with columns
 `Record Type | Error ID | Token | Obligation Digest | Mechanism | Witness IDs | Error Location | Flawed Identifier | Cited Target | Lineage JSON | Probe Path | Probe Output SHA256 | Verdict | Derived From Receipt ID`.

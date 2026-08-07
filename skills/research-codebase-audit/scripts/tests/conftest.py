@@ -43,3 +43,6 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "u13: unit U13 — the DU comment-closure adjudication "
         "contract")
+    config.addinivalue_line(
+        "markers", "u14: unit U14 — register lints and severity (the closed "
+        "footer reason vocabulary and the severity-4 target-type join)")
