@@ -25,6 +25,10 @@ Reference files (all paths relative to this skill's folder):
   `scripts/severity_tokens.py`, `scripts/severity_token_rulings.py`,
   `scripts/assemble_boundary.py`, and `scripts/certify_stage.py` (the only writer of stage status;
   its typed evidence table is `scripts/stage_obligations.json`).
+- `scripts/usage_statusline.py` — the operator's Claude Code statusline command; it writes the
+  session ID and both usage windows to `audit/_run/usage.json` for the wave-boundary pause rule.
+- `scripts/resume_run.py` — the one guarded recovery command after process death: liveness gate,
+  reset-time check, the full resume-check/demote loop, then `claude --resume`.
 
 Invariants you never break:
 
@@ -90,6 +94,21 @@ defaults and let the user correct.
    except `b8_rewriter`, which runs at `medium`. Ask only for exceptions: “name any role you
    want moved.” Legal tiers are `low`, `medium`, `high`, `xhigh`, and `max`. The resulting map is
    written once at intake and never edited; changing effort later requires a fresh run.
+9. **Launch requirements.** A long run is certainly interrupted, so check two things before
+   any stage work and record the outcome either way.
+   - **Retry watchdog.** Verify `CLAUDE_CODE_RETRY_WATCHDOG=1` is set in the session
+     environment (`echo "${CLAUDE_CODE_RETRY_WATCHDOG:-unset}"`). It makes a usage-limit stop
+     back off until the window resets instead of ending the turn. If it is unset, tell the user
+     to relaunch the session with it set, or to accept degraded resilience; record a `warnings`
+     entry either way it is resolved. Open fact: the watchdog is documented for headless runs,
+     and whether it also operates in interactive sessions is unconfirmed. Nothing here depends
+     on it — observe what a usage-limit stop actually does on the next real run and record the
+     result in `warnings` then.
+   - **Usage feed.** Verify `audit/_run/usage.json` exists and is fresh once the statusline is
+     active. If the user has no statusline feed configured, give them the one-line setup — point
+     the Claude Code statusline command at `scripts/usage_statusline.py` — and record a
+     `warnings` entry if they decline. The run still works without it; only the proactive
+     wave-boundary pause degrades to "no data, no hold".
 
 Write `audit/_run/manifest.json`:
 
@@ -169,9 +188,14 @@ Completion: manifest written and every field above resolved with the user.
 
 ## Phase 2 — Init (boundary B0)
 
-0. Run `scripts/certify_stage.py init --package-root <package-root>`, then
+0. Run `scripts/certify_stage.py init --package-root <package-root> --conductor-pid <pid>`, then
    `scripts/certify_stage.py start --package-root <package-root> --stage b0`. This records the
    run identity, creates the mode's pending stage entries, and creates `audit/_run/RUNNING`.
+   Resolve `<pid>` by walking the shell's ancestry (`ps -o ppid= -p <pid>`) up to the first
+   `claude` process — that long-lived CLI process, not the certification command, is what the
+   marker must name so a second launch can tell a live run from a dead one. Resolution is
+   best-effort: if you cannot find it, drop the flag and proceed (the marker then omits the
+   `pid=` line and the defense degrades to the flag-guarded behavior), never block the run on it.
 1. Create `audit/` with empty registers per `references/registers.md`, plus
    `audit/_work/`, `audit/_code_errors/`, `audit/_recheck/`, `audit/_code_error_recheck/`,
    `audit/_recheck_supplementary/`, `audit/_code_error_recheck_supplementary/`,
@@ -184,7 +208,8 @@ Completion: manifest written and every field above resolved with the user.
    `paper_source_set` entries with `source_path`, `source_sha256`, `audit_path`, and
    `audit_sha256`; the three singular paper fields remain pinned to the root entry only for
    compatibility. Unsupported inclusion syntax fails intake with its source line.
-4. Dispatch the **CODEMAP subagent** (`references/prompts/codemap.md`; role: `codemap`): produces
+4. Apply the Phase-3 usage hold before this dispatch. Dispatch the **CODEMAP subagent**
+   (`references/prompts/codemap.md`; role: `codemap`): produces
    `audit/CODEMAP.md` with `S-/D-/B-` ID tables, materials inventory, the mode-governed
    **Reported Artifact Token Inventory**, and a **preconditions
    score** (README present? unique output↔script mapping? documented data sources?). Low
@@ -222,6 +247,17 @@ Mechanics:
 
 - The two streams are independent — run them in parallel. Within a stream, workers of the same
   stage run in parallel (one subagent per worker/cluster, single fire-and-forget message each).
+- **Usage hold at wave boundaries.** This bullet is the single authoritative pause rule; it
+  governs **every** dispatch site in this file (including the Phase 2 CODEMAP dispatch) and in
+  the three pipeline files, multi-worker and single-worker alike. Before dispatching a wave,
+  read `audit/_run/usage.json`. No file, or a snapshot whose `resets_at` has already passed
+  (expired), means no data — dispatch normally. If any window's `used_percentage` is ≥ 90, do
+  not dispatch: schedule a one-shot session cron for the **latest** `resets_at` among the
+  at-threshold windows **plus a 5-minute buffer** (the buffer covers the documented ~90-second
+  early-fire allowance; clamp the deadline inside the session task's 7-day lifetime), go idle,
+  and continue at wake. Workers already in flight finish their shards — the retry watchdog
+  protects them. Write all boundary state before the hold, so a death during the hold resumes
+  cheaply. The threshold is a heuristic that reduces mid-wave stops, not a guarantee.
 - Before a stage does work, run `certify_stage.py start --stage <key>`. After its boundary work,
   run `certify_stage.py finish --stage <key> --outcome done`; that command re-resolves the
   stage's evidence and is the only route to `done`. On a terminal retry failure, use
@@ -311,13 +347,30 @@ user approval.
 
 If `audit/_run/manifest.json` exists at intake, offer to resume:
 
-0. Run `scripts/certify_stage.py resume-check --package-root <package-root> --clear-stale-marker`.
-   It replaces the crash-surviving marker, verifies the canonical root,
-   tree fingerprint, and mechanism-schema version, and re-derives every recorded `done`. A tree
-   or schema mismatch requires a fresh audit. For each stale evidence pass it reports, run
-   `certify_stage.py demote --stage <key> --reason "<failed obligation>"`; never hand-demote it.
-   Discard only that boundary's stale staging files, then rerun the same
-   `resume-check --clear-stale-marker` command until all remaining recorded passes verify.
+0. Run `python <skill>/scripts/resume_run.py --package-root <package-root>`. It is the one
+   recovery command after process death and it cannot skip re-verification: it refuses while the
+   marker's recorded conductor PID is still alive, reports a usage window that has not reset yet
+   and asks before relaunching, runs the full `resume-check` → demote → staging-discard loop
+   until one pass comes back clean, and only then relaunches the recorded conversation with
+   `claude --resume <session-id>`. A tree, canonical-root, or mechanism-schema mismatch is not
+   demotable: the launcher refuses and a fresh audit is the only route. `--print-only` prints the
+   relaunch command instead of running it; `--yes` skips the reset-time confirmation.
+
+   **Fallback — the previous session is still alive.** The launcher refuses and names the live
+   PID. Either continue that run in its own window, or terminate that process first and rerun the
+   launcher; do not start a second conductor over a live one.
+
+   **Fallback — no session ID is recorded anywhere.** The launcher refuses with the manual
+   instruction: run `claude --resume`, pick this audit's conversation by hand, and — before any
+   audit work — have that session run
+   `certify_stage.py resume-check --package-root <package-root> --clear-stale-marker
+   --conductor-pid <its own conductor PID>` to take marker ownership. Every resumed conductor
+   owes that re-registration: without it the marker still names a dead process and a later
+   launcher could clear it out from under the live session. The manual loop is the same one the
+   launcher mechanizes — for each stale evidence pass `resume-check` reports, run
+   `certify_stage.py demote --stage <key> --reason "<failed obligation>"` (never hand-demote),
+   discard only that boundary's stale staging files, and rerun `resume-check` until all
+   remaining recorded passes verify.
 1. Resume at the first stage key whose status ≠ `done` (stream order: each stream
    independently, then finalize). Within a worker stage, re-dispatch only workers whose shards
    are missing or failing lint — completed shards are never re-run.

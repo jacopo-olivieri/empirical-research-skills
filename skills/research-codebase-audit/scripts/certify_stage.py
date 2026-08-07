@@ -307,12 +307,36 @@ def git_commit(package_root):
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def read_usage_snapshot(package_root):
+    """Return ``audit/_run/usage.json`` as a dict, or ``{}`` when unusable.
+
+    The statusline feed script (``usage_statusline.py``) is the writer.  Every
+    consumer treats the file as advisory: a missing, unreadable, or malformed
+    snapshot is never an error, only an absence of data.
+    """
+    _, run_dir, _, _ = audit_paths(package_root)
+    try:
+        snapshot = json.loads((run_dir / "usage.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return snapshot if isinstance(snapshot, dict) else {}
+
+
+def recorded_session_id(package_root):
+    """The conversation ID the statusline feed last observed, or ``None``."""
+    value = read_usage_snapshot(package_root).get("session_id")
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def make_run_identity(package_root, manifest):
     return {
         "git_commit": git_commit(package_root),
         "canonical_package_root": str(package_root),
         "tree_fingerprint": compute_tree_fingerprint(package_root, manifest),
         "mechanism_schema_version": MECHANISM_SCHEMA_VERSION,
+        # Informational only: a resumed conversation may be renumbered by the
+        # platform, so ``_identity_failures`` never reads this key.
+        "session_id": recorded_session_id(package_root),
     }
 
 
@@ -356,24 +380,101 @@ def require_canonical_identity(package_root, manifest):
         )
 
 
-def _marker_text():
-    started = datetime.now(timezone.utc).isoformat()
-    return f"started_at={started}\npid={os.getpid()}\n"
+def _utc_now_iso():
+    """The one time convention this codebase writes: UTC, ISO 8601."""
+    return datetime.now(timezone.utc).isoformat()
 
 
-def replace_running_marker(package_root, clear_stale=False):
+def _marker_text(conductor_pid=None):
+    """Render the RUNNING marker.
+
+    ``conductor_pid`` is the *long-lived conductor process's* PID, passed in
+    explicitly.  This script's own ``os.getpid()`` is never recorded: it dies
+    the moment the command returns, so it could only ever look stale.  When no
+    conductor PID is resolvable the ``pid=`` line is omitted and the marker
+    degrades to the flag-guarded behavior it had before conductor PIDs existed.
+    """
+    text = f"started_at={_utc_now_iso()}\n"
+    if conductor_pid is not None:
+        text += f"pid={int(conductor_pid)}\n"
+    return text
+
+
+def marker_pid(text):
+    """Parse a marker's recorded PID; ``None`` when absent or unparseable."""
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "pid":
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+    return None
+
+
+def pid_is_alive(pid):
+    """True when the recorded process still exists.
+
+    ``PermissionError`` means the process exists but is owned by another user —
+    alive for our purposes.  Anything else (including a nonsensical PID) is
+    treated as dead, because refusing on an unusable value would strand a run.
+    """
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError, ValueError):
+        return False
+    return True
+
+
+def live_conductor_refusal(marker_text, recorded_pid):
+    """The amendment-3 refusal text for a marker naming a live foreign PID."""
+    details = marker_text.strip()
+    return (
+        f"another audit run is live: audit/_run/RUNNING records conductor pid "
+        f"{recorded_pid}, and that process is still running"
+        + (f" ({details})" if details else "")
+        + "; --clear-stale-marker cannot override a live conductor. Either "
+        "continue that session in its own window, or terminate that process "
+        "first and rerun."
+    )
+
+
+def replace_running_marker(package_root, clear_stale=False, conductor_pid=None):
     _, run_dir, _, marker = audit_paths(package_root)
     run_dir.mkdir(parents=True, exist_ok=True)
-    if marker.exists() and not clear_stale:
-        details = marker.read_text(encoding="utf-8", errors="replace").strip()
-        raise CertificationError(
-            "another audit run appears to be live because audit/_run/RUNNING exists"
-            + (f" ({details})" if details else "")
-            + "; if the previous run is certainly dead, retry with --clear-stale-marker"
-        )
     if marker.exists():
+        details = marker.read_text(encoding="utf-8", errors="replace")
+        recorded_pid = marker_pid(details)
+        # Self-ownership first: a marker naming *this* process cannot be a
+        # second process, so it is replaceable under the ordinary flag rule.
+        # Without this the guarded resume loop would deadlock on the marker its
+        # own first pass wrote.  ``os.getpid()`` alone is not enough: run as a
+        # CLI subprocess this is the short-lived certify process, never the
+        # conductor, so a conductor re-registering its *own* marker would be
+        # classified foreign-and-alive and hard-refused.  The caller-supplied
+        # conductor PID is self-owned for the same reason.
+        owned_pids = {os.getpid()}
+        if conductor_pid is not None:
+            owned_pids.add(int(conductor_pid))
+        if (recorded_pid is not None and recorded_pid not in owned_pids
+                and pid_is_alive(recorded_pid)):
+            raise CertificationError(
+                live_conductor_refusal(details, recorded_pid))
+        if not clear_stale:
+            stripped = details.strip()
+            raise CertificationError(
+                "another audit run appears to be live because audit/_run/RUNNING exists"
+                + (f" ({stripped})" if stripped else "")
+                + "; if the previous run is certainly dead, retry with --clear-stale-marker"
+            )
         marker.unlink()
-    marker.write_text(_marker_text(), encoding="utf-8")
+    marker.write_text(_marker_text(conductor_pid), encoding="utf-8")
 
 
 def remove_running_marker(package_root):
@@ -394,7 +495,7 @@ def stages_for_mode(mode):
     )
 
 
-def init_run(package_root, clear_stale_marker=False):
+def init_run(package_root, clear_stale_marker=False, conductor_pid=None):
     manifest = read_manifest(package_root)
     stages = stages_for_mode(manifest.get("mode"))
     try:
@@ -413,9 +514,11 @@ def init_run(package_root, clear_stale_marker=False):
         paper_sources.build_source_set(package_root, manifest)
     except paper_sources.PaperSourceError as exc:
         raise CertificationError(str(exc)) from exc
-    replace_running_marker(package_root, clear_stale_marker)
+    replace_running_marker(package_root, clear_stale_marker, conductor_pid)
     manifest["run_identity"] = make_run_identity(package_root, manifest)
     manifest["certified_stage_evidence_version"] = CERTIFIED_EVIDENCE_VERSION
+    # Fresh entries carry no times: a pending stage has neither started nor
+    # ended, and an absent field is honest where a null would be noise.
     manifest["stages"] = {
         stage: {"status": "pending", "retries": 0, "shards": {}}
         for stage in stages
@@ -482,6 +585,10 @@ def start_stage(package_root, stage):
     if status == "blocked":
         entry["retries"] = int(entry.get("retries", 0)) + 1
     entry["status"] = "running"
+    entry["started_at"] = _utc_now_iso()
+    # A retry starts a fresh attempt: the previous attempt's end time would
+    # otherwise sit beside a running stage and read as a finished one.
+    entry.pop("ended_at", None)
     entry.pop("reason", None)
     entry.pop("note", None)
     write_manifest_atomic(package_root, manifest)
@@ -714,6 +821,7 @@ def finish_stage(package_root, stage, outcome, reason=None):
                     + (result.stdout + result.stderr).strip()
                 )
         entry["status"] = "blocked"
+        entry["ended_at"] = _utc_now_iso()
         entry["reason"] = " ".join(reason.split())
         write_manifest_atomic(package_root, manifest)
         return
@@ -731,6 +839,7 @@ def finish_stage(package_root, stage, outcome, reason=None):
         )
     _capture_certified_stage_evidence(package_root, stage, entry)
     entry["status"] = "done"
+    entry["ended_at"] = _utc_now_iso()
     entry.pop("reason", None)
     entry.pop("note", None)
     write_manifest_atomic(package_root, manifest)
@@ -913,9 +1022,9 @@ def verify_run(package_root):
     return summary
 
 
-def resume_check(package_root, clear_stale_marker=False):
+def resume_check(package_root, clear_stale_marker=False, conductor_pid=None):
     manifest = read_manifest(package_root)
-    replace_running_marker(package_root, clear_stale_marker)
+    replace_running_marker(package_root, clear_stale_marker, conductor_pid)
     failures = _identity_failures(package_root, manifest, check_fingerprint=True)
     evidence_failures = verify_done_stages(package_root, manifest)
     summary = _done_stage_summary(manifest, evidence_failures)
@@ -936,6 +1045,10 @@ def demote_stage(package_root, stage, reason=None):
             f"stage {stage!r} is {entry['status']!r}; demote permits only done -> pending"
         )
     entry["status"] = "pending"
+    # A pending stage has no times; the demoted attempt's pair is discarded
+    # rather than left to describe work the run no longer credits.
+    entry.pop("started_at", None)
+    entry.pop("ended_at", None)
     if reason is None or not reason.strip():
         entry["note"] = "demoted after failed verification"
     else:
@@ -1148,8 +1261,16 @@ def build_parser():
         )
         return subparser
 
+    def conductor_pid_argument(subparser):
+        subparser.add_argument(
+            "--conductor-pid", type=int, default=None,
+            help="PID of the long-lived conductor process to record in "
+                 "audit/_run/RUNNING (omit when it cannot be resolved)",
+        )
+
     init = command("init")
     init.add_argument("--clear-stale-marker", action="store_true")
+    conductor_pid_argument(init)
 
     start = command("start")
     start.add_argument("--stage", required=True)
@@ -1173,6 +1294,7 @@ def build_parser():
 
     resume = command("resume-check")
     resume.add_argument("--clear-stale-marker", action="store_true")
+    conductor_pid_argument(resume)
 
     command("close-run")
     return parser
@@ -1184,7 +1306,7 @@ def main(argv=None):
     try:
         package_root = canonical_package_root(args.package_root)
         if args.command == "init":
-            init_run(package_root, args.clear_stale_marker)
+            init_run(package_root, args.clear_stale_marker, args.conductor_pid)
         elif args.command == "start":
             start_stage(package_root, args.stage)
         elif args.command == "finish":
@@ -1196,7 +1318,8 @@ def main(argv=None):
         elif args.command == "demote":
             demote_stage(package_root, args.stage, args.reason)
         elif args.command == "resume-check":
-            detail = resume_check(package_root, args.clear_stale_marker)
+            detail = resume_check(
+                package_root, args.clear_stale_marker, args.conductor_pid)
         elif args.command == "close-run":
             close_run(package_root)
     except CertificationError as exc:
