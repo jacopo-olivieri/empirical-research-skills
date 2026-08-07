@@ -250,7 +250,9 @@ TRUE, and `quantitative_result`; an `artifact:` token fails outright. The join r
   blocked}`. `not_error` and `duplicate_of:<ID>` rows carry no Severity.
 
 There is no `Potential Issue` column in the registers; the Excel export adds one to the
-`Paper Claims` sheet only (`TRUE` iff `Severity` non-empty).
+`Paper Claims` sheet only (`TRUE` iff `Severity` non-empty). The export also omits the
+`Used in Text`, `Output IDs`, and `Blocked Check` columns from the `Paper Claims` sheet —
+the register keeps all 13 columns; the cut is presentation-only.
 
 ## Issue Description structure (three-part)
 
@@ -1128,8 +1130,9 @@ States are `pending`, `acknowledged_unverified`, `qa_commissioned:QA-####`,
 `qa_closed:QA-####:conclusive`, `qa_closed:QA-####:inconclusive`, or `minted:BC-####`.
 The allowed transitions are: pending → acknowledged/commissioned/minted; commissioned → closed
 with the same QA ID and an explicit qualifier; acknowledged or conclusive closure → minted;
-inconclusive closure → a new commissioned state or minted; minted is immutable. b9 exports
-pending rows as-is on the explicitly unverified sheet; the completion-report gate is
+inconclusive closure → a new commissioned state or minted; minted is immutable. b9 accepts
+pending rows, which remain recorded in the `late_observations_<stream>.md` collection
+artifacts; the completion-report gate is
 `certify_stage.py close-run`, which refuses to close the run until the first Phase-4
 disposition batch has replaced every pending state. Before bC, copy each
 present late-observation artifact to

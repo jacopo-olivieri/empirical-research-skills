@@ -8,7 +8,9 @@ Markdown registers and the run manifest, writes ``audit/code_review.xlsx``:
   variable legends, degraded-confidence warnings from the manifest.
 - ``Paper Claims`` (full replication mode only): claims register minus
   ``*_Original`` columns, plus computed ``Potential Issue`` (TRUE iff
-  Severity non-empty).
+  Severity non-empty), minus the internal columns in ``CLAIMS_HIDDEN_COLS``
+  (``Used in Text``, ``Output IDs``, ``Blocked Check`` — kept in the
+  register, omitted from the sheet).
 - ``Code Errors``: code-error register minus ``*_Original`` columns.
 
 Usage:
@@ -100,16 +102,13 @@ CLAIMS_COLUMN_MEANINGS = {
     "Claim ID": "Stable identifier for the claim row.",
     "Paper Context": "Where the claim lives in the paper, in human terms (section > subsection > paragraph or note cue).",
     "Paper Quote": "Verbatim quote from the manuscript containing the claimed fact (searchable with ctrl-F).",
-    "Used in Text": "TRUE if the claimed number/object is actually used in the paper; FALSE if it exists only in code or unused artifacts.",
     "Claim Type": "Kind of claim (quantitative result, sample count, specification, robustness, transcription, ...).",
     "Claim Text": "The assertion that was checked.",
     "Code/Data Source": "Script(s), dataset(s), or documentation supporting or contradicting the claim.",
-    "Output IDs": "Related paper tables/figures/outputs (output register IDs).",
     "Status": "Verification result — see the status legend.",
     "Potential Issue": "TRUE if the review flagged a potential issue on this row.",
     "Severity": "1 (cosmetic) to 4 (could change a headline result); filled only on flagged rows.",
     "Issue Description": "Author-facing description: what the paper says, what the code shows, why it matters.",
-    "Blocked Check": "For a blocked claim, what stayed checkable from visible material (filenames, headers, shapes) and what that check found.",
     "Related Error IDs": "Directly related code-error rows, if any.",
 }
 
@@ -137,30 +136,18 @@ SHEET_GUIDE = [
         "A register of potential coding errors found in the scripts. Each row is a single "
         "error: its type, location, the author-facing description, and why it matters.",
     ),
-    (
-        "Handoff ledger",
-        "Terminal state of every cross-span claim obligation, including any explicitly accepted blocked fallback.",
-    ),
-    (
-        "Late observations (unverified)",
-        "Observations raised during the single supplementary wave. These are explicitly unverified and never mutate the registers without an approved bC correction plan.",
-    ),
-    (
-        "Late observation coverage",
-        "Per-stream collection coverage derived from certified b6b stage states. A blocked b6b is degraded coverage, never proof of zero observations.",
-    ),
 ]
 
-LO_COLS = ["LO ID", "Source Shard", "Anchor", "Observation"]
-LO_SHEET_COLS = ["Stream"] + LO_COLS
 LO_COVERAGE_COLS = [
     "Stream", "Required", "b6b State", "Collection State", "Artifact Head",
     "Blocker Evidence IDs",
 ]
-HANDOFF_LEDGER_COLS = [
-    "Obligation ID", "Kind", "Source Shard", "Anchor", "Destination Worker",
-    "Terminal State", "Covering Claim ID", "Disposition",
-]
+
+# Register columns deliberately omitted from the Paper Claims sheet: internal
+# surfaces whose audiences are the pipeline and its lints, not the author. The
+# register keeps all 13 columns; the workbook cut is presentation-only. The b9
+# lint keeps its own independent mirror of this list — never share the constant.
+CLAIMS_HIDDEN_COLS = ("Used in Text", "Output IDs", "Blocked Check")
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -329,19 +316,6 @@ def _write_atomic(path, payload):
         raise
 
 
-def late_observation_rows(audit, mode):
-    rows = []
-    streams = ("claims", "code") if mode == "replication" else ("code",)
-    for stream in streams:
-        path = audit / f"late_observations_{stream}.md"
-        if not path.is_file():
-            continue
-        headers, parsed = parse_md_table(path.read_text(encoding="utf-8"))
-        if headers == LO_COLS:
-            rows.extend([[stream] + row for row in parsed if len(row) == len(LO_COLS)])
-    return sorted(rows, key=lambda row: row[1])
-
-
 def derive_late_observation_coverage(audit, manifest, mode):
     rows = []
     for stream in ("claims", "code"):
@@ -364,31 +338,6 @@ def derive_late_observation_coverage(audit, manifest, mode):
         ])
     path = audit / "_run/late_observation_coverage.md"
     _write_atomic(path, "# Late observation coverage\n\n" + _md_table(LO_COVERAGE_COLS, rows))
-    return rows
-
-
-def handoff_ledger_rows(audit):
-    path = audit / "_run/handoff_ledger.json"
-    try:
-        ledger = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"cannot read handoff ledger {path}: {exc}") from exc
-    rows = []
-    for entry in sorted(ledger.get("H", []) + ledger.get("X", []),
-                        key=lambda row: row.get("id", "")):
-        disposition = entry.get("disposition") or {}
-        anchor = entry.get("anchor", "")
-        if isinstance(anchor, dict):
-            end = anchor.get("end_line", anchor.get("start_line", ""))
-            lines = (str(anchor.get("start_line", "")) if end == anchor.get("start_line")
-                     else f"{anchor.get('start_line', '')}-{end}")
-            anchor = f"{anchor.get('source_path', '')}:{lines}"
-        rows.append([
-            entry.get("id", ""), entry.get("kind", ""),
-            entry.get("source_shard", ""), anchor,
-            entry.get("destination_worker", ""), entry.get("state", ""),
-            entry.get("covering_c_id") or "", disposition.get("reason", ""),
-        ])
     return rows
 
 
@@ -423,9 +372,7 @@ def main() -> int:
 
     wb = Workbook()
     wb.remove(wb.active)
-    sheets_present, status_usage = [
-        "Code Errors", "Late observations (unverified)", "Late observation coverage"
-    ], {}
+    sheets_present, status_usage = ["Code Errors"], {}
 
     if args.mode == "replication":
         claims_md = (audit / "claims_register.md").read_text(encoding="utf-8")
@@ -434,32 +381,25 @@ def main() -> int:
             print("ERROR: could not parse claims_register.md", file=sys.stderr)
             return 1
         ch, cr = drop_and_augment(c_headers, c_rows, add_potential_issue=True)
+        # The author-facing cut: internal columns leave the sheet before the
+        # Overview legend sees the header list, so sheet, autofilter span,
+        # and legend agree on the 11 visible columns.
+        keep = [i for i, h in enumerate(ch) if h not in CLAIMS_HIDDEN_COLS]
+        ch = [ch[i] for i in keep]
+        cr = [[r[i] for i in keep] for r in cr]
         sheets_present.insert(0, "Paper Claims")
         status_usage["claims"] = sorted({r[ch.index("Status")] for r in cr if r[ch.index("Status")]})
         status_usage["claims_cols"] = ch
-        if manifest.get("paper_source_set"):
-            sheets_present.append("Handoff ledger")
 
     eh, er = drop_and_augment(e_headers, e_rows)
     status_usage["errors"] = sorted({r[eh.index("Status")] for r in er if r[eh.index("Status")]})
     status_usage["errors_cols"] = eh
-    lo_rows = late_observation_rows(audit, args.mode)
-    coverage_rows = derive_late_observation_coverage(
-        audit, manifest, args.mode)
+    derive_late_observation_coverage(audit, manifest, args.mode)
 
     write_overview(wb, sheets_present, status_usage, warnings)
     if args.mode == "replication":
         write_data_sheet(wb, "Paper Claims", ch, cr)
-        if manifest.get("paper_source_set"):
-            try:
-                handoff_rows = handoff_ledger_rows(audit)
-            except ValueError as exc:
-                print(f"ERROR: {exc}", file=sys.stderr)
-                return 1
-            write_data_sheet(wb, "Handoff ledger", HANDOFF_LEDGER_COLS, handoff_rows)
     write_data_sheet(wb, "Code Errors", eh, er)
-    write_data_sheet(wb, "Late observations (unverified)", LO_SHEET_COLS, lo_rows)
-    write_data_sheet(wb, "Late observation coverage", LO_COVERAGE_COLS, coverage_rows)
 
     out = args.output or audit / "code_review.xlsx"
     Path(out).parent.mkdir(parents=True, exist_ok=True)

@@ -53,3 +53,7 @@ def pytest_configure(config):
         "markers", "u16: unit U16 — usage-limit resilience and manifest stage "
         "timestamps (conductor-PID marker liveness, the guarded resume "
         "launcher, the usage feed, started_at/ended_at)")
+    config.addinivalue_line(
+        "markers", "u17: unit U17 — Opus 5 + medium-effort defaults and the "
+        "author-facing workbook cut (three sheets, 11 visible Paper Claims "
+        "columns, independent b9 hidden-column mirror)")

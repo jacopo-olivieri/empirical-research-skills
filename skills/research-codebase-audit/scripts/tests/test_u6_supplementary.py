@@ -631,13 +631,16 @@ def test_late_observation_transition_matrix(before, after, allowed):
     assert lint.valid_lo_transition(before, after) is allowed
 
 
-def test_b9_export_adds_late_observation_sheets_and_explicit_absence(tmp_path):
+def test_b9_export_omits_late_observation_sheets_but_keeps_coverage_md(tmp_path):
+    """U17 inversion: the LO sheets are absent from the workbook while the
+    coverage md still carries the explicit-absence values."""
     a = rb.make_b9(tmp_path, error_rows=[rb.error_row("E-0100")],
                    mode="code_errors_only")
     workbook = openpyxl.load_workbook(a.audit / "code_review.xlsx", read_only=True)
-    assert "Late observations (unverified)" in workbook.sheetnames
-    coverage = list(workbook["Late observation coverage"].values)
-    assert coverage[1][-2:] == ("not recorded", "none recorded")
+    assert "Late observations (unverified)" not in workbook.sheetnames
+    assert "Late observation coverage" not in workbook.sheetnames
+    coverage = (a.audit / "_run/late_observation_coverage.md").read_text()
+    assert "| not recorded | none recorded |" in coverage
     assert rb.lint(a, "b9").returncode == 0
 
 
@@ -684,7 +687,10 @@ def test_close_run_is_the_completion_report_gate_for_pending_dispositions(tmp_pa
     assert closed.returncode == 0, closed.stdout + closed.stderr
 
 
-def test_b9_exports_pending_dispositions_without_refusing(tmp_path):
+def test_b9_accepts_pending_dispositions_without_refusing(tmp_path):
+    """b9 accepts pending dispositions: the pending row's surviving home is the
+    `late_observations_code.md` collection artifact, which the export leaves
+    untouched (U17 removed its workbook sheet, not the artifact)."""
     a = rb.make_b9(tmp_path, error_rows=[rb.error_row("E-0100")],
                    mode="code_errors_only")
     a.write("late_observations_code.md", lo_artifact(
@@ -697,6 +703,8 @@ def test_b9_exports_pending_dispositions_without_refusing(tmp_path):
     assert regenerated.returncode == 0, regenerated.stdout + regenerated.stderr
     result = rb.lint(a, "b9")
     assert result.returncode == 0, result.stdout + result.stderr
+    artifact = (a.audit / "late_observations_code.md").read_text()
+    assert "LO-E-0001" in artifact and "| pending |" in artifact
 
 
 def test_b6b_refuses_dangling_duplicate_targets_in_claims_and_output(tmp_path):

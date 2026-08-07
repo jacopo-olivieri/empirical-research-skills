@@ -143,20 +143,20 @@ Providing project context is optional. It does not exclude other materials from 
 
 #### 6. Model and Reasoning Effort
 
-Configure the model and reasoning effort used by the audit subagents. If you do not specify a model, the subagents use the model selected for the current Claude Code session. Opus is recommended for the strongest review.
+Configure the model and reasoning effort used by the audit subagents. If you do not specify a model, the subagents use the model selected for the current Claude Code session. For the strongest review, run the session on Opus 5, or set the worker model to `opus` during setup.
 
 Reasoning effort is set separately for each audit stage and does not inherit the current session setting. The audit uses the defaults below.
 
 | Audit stage | Purpose | Default reasoning effort |
 | --- | --- | :---: |
-| **Project mapping** | Identify the project’s inputs, scripts, dependencies, pipeline stages, and outputs, and trace how they relate to one another. | High |
-| **Review planning** | Define how the audit will examine the code and pipeline and, for a **Full audit**, compare the paper with the implementation. | High |
-| **Primary review** | Inspect the relevant project materials to identify potential code and pipeline errors and, for a **Full audit**, paper–code inconsistencies. | High |
-| **Initial synthesis** | Consolidate related observations, identify duplicates, and preserve a traceable set of potential findings for further review. | High |
-| **Additional file review** | Re-examine files containing potential findings, with the number of additional review passes determined by the configured [Review Depth](#3-review-depth). | High |
-| **Finding rechecks** | Verify the evidence and reasoning for each potential finding, either in batches or individually as determined by the selected review depth. | High |
-| **Final reconciliation** | Combine the recheck evidence, resolve disagreements, and assign a final status to each potential finding. For a Full audit, also complete the final paper–code cross-checks and resolve escalated inconsistencies. | High |
-| **Author-facing rewrite** | Rewrite the final audit records as clear, consistent entries for the findings workbook. | Medium |
+| **Project mapping** | Identify the project’s inputs, scripts, dependencies, pipeline stages, and outputs, and trace how they relate to one another. | Medium |
+| **Review planning** | Define how the audit will examine the code and pipeline and, for a **Full audit**, compare the paper with the implementation. | Medium |
+| **Primary review** | Inspect the relevant project materials to identify potential code and pipeline errors and, for a **Full audit**, paper–code inconsistencies. | Medium |
+| **Initial synthesis** | Consolidate related observations, identify duplicates, and preserve a traceable set of potential findings for further review. | Medium |
+| **Additional file review** | Re-examine files containing potential findings, with the number of additional review passes determined by the configured [Review Depth](#3-review-depth). | Medium |
+| **Finding rechecks** | Verify the evidence and reasoning for each potential finding, either in batches or individually as determined by the selected review depth. | Medium |
+| **Final reconciliation** | Combine the recheck evidence, resolve disagreements, and assign a final status to each potential finding. For a Full audit, also complete the final paper–code cross-checks and resolve escalated inconsistencies. | Medium |
+| **Author-facing rewrite** | Rewrite the final audit records as clear, consistent entries for the findings workbook. | Low |
 
 You can override the default reasoning effort for any stage during setup.
 

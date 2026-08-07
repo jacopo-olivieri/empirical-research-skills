@@ -29,7 +29,7 @@ ROLE_KEYS = (
     "b7_cross_linker", "b7_claim_recheck", "b8_rewriter",
 )
 DEFAULT_EFFORT_MAP = {
-    role: ("medium" if role == "b8_rewriter" else "high")
+    role: ("low" if role == "b8_rewriter" else "medium")
     for role in ROLE_KEYS
 }
 LEDGER_COLS = [
