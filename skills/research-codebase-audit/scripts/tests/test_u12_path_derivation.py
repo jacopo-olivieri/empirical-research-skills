@@ -1149,7 +1149,8 @@ def test_tier1_record_schema_xor_accepts_digest_and_rejects_probe_for_pd(
     text = shard.read_text(encoding="utf-8")
     probe = rb.md_table(rb.PROBE_VERIFICATION_COLS, [[
         "PD", "VR-0001", u3.PD_SOURCE, u3.PD_WITNESS,
-        "the path resolves", "probe.py", "accepted", "py/pack_out.py:6"]])
+        "the path resolves", "probe.py", "accepted", "py/pack_out.py:6",
+        "na"]])
     digest_header = "| " + " | ".join(rb.MF_VERIFICATION_COLS) + " |"
     keep, dropping = [], False
     for line in text.splitlines(keepends=True):

@@ -30,7 +30,7 @@ MF_RECORD_COLS = [
 PROBE_RECORD_COLS = [
     "Channel", "Record ID", "Source ID", "Witness ID",
     "Proposition Tested", "Harness / Input Domain", "Observed Result",
-    "Scope Anchor",
+    "Scope Anchor", "Excluded-Class Input",
 ]
 RECEIPT_COLS = [
     "Channel", "Receipt ID", "Source ID", "Witness ID", "Record ID",

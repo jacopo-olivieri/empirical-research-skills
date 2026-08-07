@@ -40,3 +40,6 @@ def pytest_configure(config):
         "groups, AC macro-fronted interpreters)")
     config.addinivalue_line(
         "markers", "u12: unit U12 — the path/import idiom-closure channel")
+    config.addinivalue_line(
+        "markers", "u13: unit U13 — the DU comment-closure adjudication "
+        "contract")

@@ -576,7 +576,7 @@ def _ac_dismissal_case(tmp_path, *, with_record):
         records_text = rb.md_table(rb.PROBE_VERIFICATION_COLS, [[
             "AC", "VR-AC-0001", source_id_value, witness,
             "the argument is read through an indirection", "probe.py",
-            "accepted", source["witnesses"][0]["anchor"],
+            "accepted", source["witnesses"][0]["anchor"], "na",
         ]])
     shard = a.write(
         "_code_error_recheck/k1.md",
