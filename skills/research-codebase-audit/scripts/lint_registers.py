@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import authorized_deltas
+import comment_closure
 import definition_use as du
 import build_detector_mapping as detector_mapping
 import evidence_views
@@ -69,8 +70,17 @@ MF_VERIFICATION_COLS = [
 PROBE_VERIFICATION_COLS = [
     "Channel", "Record ID", "Source ID", "Witness ID",
     "Proposition Tested", "Harness / Input Domain", "Observed Result",
-    "Scope Anchor",
+    "Scope Anchor", "Excluded-Class Input",
 ]
+# U13: the DU dismissal probe must exercise the guard-excluded class; every
+# other probe-schema channel declares `na`.  Declaration is visibility, not
+# proof -- mechanical verification of probe content is deliberately not built.
+EXCLUDED_CLASS_VALUES = {"yes", "na"}
+COMMENT_CLOSURE_COLS = [
+    "Channel", "Source ID", "Witness ID", "Comment Site", "Quoted Text",
+    "Verdict", "Basis",
+]
+COMMENT_CLOSURE_MARKER = "Comment closure"
 # Channels whose dismissal record is an existence/identity attestation and so
 # uses the digest-carrying schema rather than the runnable-probe schema.
 DIGEST_RECORD_CHANNELS = {"MF", "PD"}
@@ -3338,6 +3348,111 @@ def _check_code_relation(lint, shard, key, relation):
     return False
 
 
+def _verify_comment_quote(lint, shard, label, site, quoted, package_root, cache):
+    """Compare one closure row's decoded quote against its named source line."""
+    try:
+        relative, line = comment_closure.parse_anchor(site, "closure")
+    except comment_closure.CommentClosureError:
+        lint.fail(f"{shard}: comment closure row {label} Comment Site does not "
+                  "parse as <file>:<line>")
+        return
+    try:
+        decoded = mechanism.decode_cell(quoted)
+    except mechanism.MechanismSchemaError as exc:
+        lint.fail(f"{shard}: comment closure row {label} Quoted Text is not a "
+                  f"valid encoded cell: {exc}")
+        return
+    if relative not in cache:
+        try:
+            cache[relative] = comment_closure.read_source(
+                package_root, relative, "the quoted comment site")
+        except comment_closure.CommentClosureError as exc:
+            cache[relative] = None
+            lint.fail(f"{shard}: comment closure row {label} cannot be "
+                      f"verified: {exc}")
+    lines = cache[relative]
+    if lines is None:
+        return
+    if line > len(lines):
+        lint.fail(f"{shard}: comment closure row {label} names a line outside "
+                  f"{relative} ({len(lines)} line(s))")
+        return
+    if decoded.strip() != lines[line - 1].strip():
+        lint.fail(f"{shard}: comment closure row {label} Quoted Text does not "
+                  "match the source line at that site")
+
+
+def _validate_comment_closure_rows(lint, shard, text, mapping_by_key,
+                                   package_root):
+    """Validate every row of the `### Comment closure` block, expected or extra.
+
+    Returns ``(rows_by_identity, contradictions)``: the first keyed by the full
+    row identity ``(Channel, Source ID, Witness ID, Comment Site)``, the second
+    mapping a mapped key to the sites whose verdict is ``contradicts_guard``.
+    """
+    rows = tables_by_cols(
+        lint, shard, text, COMMENT_CLOSURE_COLS, "comment closure")
+    by_identity, contradictions, file_cache = {}, {}, {}
+    for row in rows:
+        key = tuple(row[field] for field in
+                    ("Channel", "Source ID", "Witness ID"))
+        site = row["Comment Site"].strip().strip("`").strip()
+        identity = key + (site,)
+        label = f"{'/'.join(key)} at {site}"
+        if identity in by_identity:
+            lint.fail(f"{shard}: duplicate comment closure row {label}")
+            continue
+        by_identity[identity] = row
+        if key not in mapping_by_key:
+            lint.fail(f"{shard}: comment closure row names unmapped key "
+                      f"{'/'.join(key)}")
+        verdict = row["Verdict"].strip().strip("`")
+        if verdict not in comment_closure.VERDICTS:
+            lint.fail(f"{shard}: comment closure row {label} has invalid Verdict "
+                      f"{verdict!r} (closed list: "
+                      f"{' | '.join(comment_closure.VERDICTS)})")
+        elif verdict == comment_closure.CONTRADICTS_GUARD:
+            contradictions.setdefault(key, []).append(site)
+        if blank_cell(row["Basis"]):
+            lint.fail(f"{shard}: comment closure row {label} has an empty Basis")
+        _verify_comment_quote(lint, shard, label, site, row["Quoted Text"],
+                              package_root, file_cache)
+    return by_identity, contradictions
+
+
+def _check_comment_closure_coverage(lint, shard, eid, expected_keys,
+                                    mapping_by_key, audit, package_root,
+                                    by_identity, contradictions, cache):
+    """Recompute each mapped key's expected sites and enforce the U13 duty."""
+    for key in sorted(expected_keys):
+        for site in contradictions.get(key, []):
+            lint.fail(f"{shard}: {eid} not_error is forbidden by the "
+                      f"contradicts_guard comment closure row {'/'.join(key)} "
+                      f"at {site}; the minimum verdict is confirmation_needed")
+        mapping = mapping_by_key.get(key)
+        if mapping is None:
+            continue
+        if key not in cache:
+            try:
+                cache[key] = comment_closure.expectation_for_key(
+                    package_root, audit, key[0], key[1], key[2],
+                    mapping["Site Anchor"])
+            except comment_closure.CommentClosureError as exc:
+                cache[key] = None
+                lint.fail(f"{shard}: comment-closure span source refused for "
+                          f"{'/'.join(key)}: {exc}")
+        resolved = cache[key]
+        if resolved is None:
+            continue
+        relative, sites = resolved
+        for line in sites:
+            site = f"{relative}:{line}"
+            if key + (site,) not in by_identity:
+                lint.fail(f"{shard}: {eid} not_error is missing the "
+                          f"'### Comment closure' row for {'/'.join(key)} "
+                          f"at {site}")
+
+
 def _validate_code_adjudication_shard(
         lint, audit, shard, text, rows, assigned, supplementary=False,
         stage_evidence_dir=None):
@@ -3418,6 +3533,39 @@ def _validate_code_adjudication_shard(
         key = tuple(record[field] for field in ("Channel", "Source ID", "Witness ID"))
         if key not in mapping_by_key:
             lint.fail(f"{shard}: verification record {record_id} names unmapped key {'/'.join(key)}")
+        # U13 (3): the probe-typed schema serves every non-MF/PD channel, so the
+        # excluded-class declaration is channel-generic -- DU owes `yes`, every
+        # other probe-schema channel owes `na`.
+        if "Excluded-Class Input" in record:
+            declared = record["Excluded-Class Input"].strip().strip("`")
+            wanted = "yes" if channel == "DU" else "na"
+            if declared not in EXCLUDED_CLASS_VALUES:
+                lint.fail(f"{shard}: verification record {record_id} has invalid "
+                          f"Excluded-Class Input {declared!r} "
+                          f"({' | '.join(sorted(EXCLUDED_CLASS_VALUES))})")
+            elif declared != wanted:
+                lint.fail(f"{shard}: verification record {record_id} on channel "
+                          f"{channel} must declare Excluded-Class Input "
+                          f"'{wanted}'")
+
+    # U13 (1): the `### Comment closure` block is required iff the shard holds at
+    # least one mechanically-mapped `not_error` ledger row, forbidden otherwise.
+    package_root = audit.parent
+    closure_required = any(
+        row["ID"] in mapped_ids and row["Verdict"] == "not_error"
+        for row in ledger_rows)
+    marker_count = len(re.findall(
+        rf"(?m)^###\s+{re.escape(COMMENT_CLOSURE_MARKER)}\s*$", text))
+    if closure_required and marker_count != 1:
+        lint.fail(f"{shard}: expected exactly one '### {COMMENT_CLOSURE_MARKER}' "
+                  f"marker, found {marker_count}")
+    elif not closure_required and marker_count:
+        lint.fail(f"{shard}: '### {COMMENT_CLOSURE_MARKER}' is forbidden in a "
+                  f"shard with no mechanically-mapped not_error row, "
+                  f"found {marker_count}")
+    closure_by_identity, closure_contradictions = _validate_comment_closure_rows(
+        lint, shard, text, mapping_by_key, package_root)
+    closure_expectations = {}
 
     for row in ledger_rows:
         eid, verdict = row["ID"], row["Verdict"]
@@ -3475,6 +3623,10 @@ def _validate_code_adjudication_shard(
                                   ("Channel", "Source ID", "Witness ID")))
             if covered != expected_keys:
                 lint.fail(f"{shard}: {eid} not_error verification records do not cover every mapped key")
+            _check_comment_closure_coverage(
+                lint, shard, eid, expected_keys, mapping_by_key, audit,
+                package_root, closure_by_identity, closure_contradictions,
+                closure_expectations)
         elif verdict == "duplicate":
             target = duplicate_target.strip()
             if target not in mapped_ids:

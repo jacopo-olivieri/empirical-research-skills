@@ -213,7 +213,12 @@ residual contract.
 `audit/_run/contracts/recheck_code.md`. Same completion/lint/retry rules (`--stage b5-code`).
 Record each passing shard with `certify_stage.py set-shard --stage code_b5 --shard <path> --status
 done`, or a twice-failing shard with `--status blocked --reason "<lint failure>"`.
-The blocked command writes one conductor fallback ledger row per assigned ID. After every shard is
+The blocked command writes one conductor fallback ledger row per assigned ID. The shard lint also
+enforces the comment-closure duty: a shard proposing any mechanically mapped `not_error` carries
+exactly one `### Comment closure` block covering every mapped key's span, and the lint refuses the
+gate outright — naming the missing or invalid source — when `_run/definition_use_bundles.md`,
+`_run/manifest_check.md`, a `Site Anchor`, or an audited span file cannot be resolved.
+After every shard is
 terminal, run `scripts/verify_dismissals.py <package-root> --audit-dir audit`; it always writes
 `audit/_run/code_b6a/dismissal_receipts.md`, using the explicit-zero form when no mapped `not_error` is
 proposed. No new IDs; no hunting for unrelated errors.
@@ -251,8 +256,8 @@ canon, stage snapshots, shards, and stage-qualified evidence only — never `_st
 ## b5s — One supplementary recheck wave
 
 Start `code_b5s`. A non-empty plan dispatches the same skeleton (role:
-`code_b5_recheck_cluster`) and uses the same 17-column ledger, witness, receipt, and footer
-validator with only plan/shard paths parameterized: `lint_registers.py --stage b5s-code --shard
+`code_b5_recheck_cluster`) and uses the same 17-column ledger, witness, comment-closure, receipt,
+and footer validator with only plan/shard paths parameterized: `lint_registers.py --stage b5s-code --shard
 <path>`. Record terminal shards under `code_b5s`. New suspicions go in the recheck-context typed
 footer, never the register. An empty plan dispatches nobody; the unsharded b5s lint verifies the
 exact empty-inventory artifact and `finish --stage code_b5s --outcome done` certifies it without

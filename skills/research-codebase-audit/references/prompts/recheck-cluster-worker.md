@@ -171,6 +171,26 @@ use only `never_fires`, `overwrites`, `wrong_target`, `stale_reference`, `omits`
 mechanism bytes or `MIXED`. Under `### Verification records`, write the exact MF/PD or DU/CV
 channel-typed table — a PD dismissal uses the MF-typed digest schema, attesting the resolved
 target's existence, path, and digest, and owes no runnable probe.
+The probe-typed record ends with `Excluded-Class Input`: every DU dismissal probe must contain at
+least one synthetic row drawn from the guard-**excluded** class, declared `Excluded-Class Input:
+yes`, with `Observed Result` stating why that row's observed outcome is correct. Every other
+probe-schema record declares `na`.
+
+Before you write `not_error` on a mechanically mapped row, read **every** comment in each mapped
+span and quote the name-bearing blocks into one `### Comment closure` table
+(`Channel | Source ID | Witness ID | Comment Site | Quoted Text | Verdict | Basis`), one row per
+physical line, with a closed verdict (`consistent`, `contradicts_guard`, `unrelated`) and a
+one-line basis on each. Spans, block selection, the per-channel meaning of "the guard", and the
+`encode_cell` convention are in `{CONTRACT_PATH}`. Any `contradicts_guard` row forbids `not_error`
+on that key's ledger row — the minimum verdict is `confirmation_needed`. The mechanical filter is a
+floor, not a ceiling: a comment that speaks to the guard without naming a listed variable still
+binds your judgement even though the lint cannot see it.
+
+| Channel | Source ID | Witness ID | Comment Site | Quoted Text | Verdict | Basis |
+| --- | --- | --- | --- | --- | --- | --- |
+| DU | DU-… | DUW-… | `do/mix.do:1` | `* keep_flag drops the 30%25 tail` | consistent | the guard drops exactly that tail |
+| DU | DU-… | DUW-… | `do/mix.do:2` | `* rows with missing cure_days belong in` | contradicts_guard | the guard excludes missing rows |
+
 Persist every DU/CV dismissal probe beside the shard and name it in
 `Harness / Input Domain`. A probe must be a single self-contained file — all synthetic inputs
 inline, reading no other file and no package data — because the verifier re-runs exactly that

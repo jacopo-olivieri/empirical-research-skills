@@ -57,7 +57,8 @@ def _mapping(channel="DU", *, eid="E-7000", anchor="do/probe.do:1",
     ), row
 
 
-def _shard_text(ledger_rows, outcome_rows=(), mf_records=(), probe_records=()):
+def _shard_text(ledger_rows, outcome_rows=(), mf_records=(), probe_records=(),
+                closure_rows=None):
     text = rb.register_text("Recheck ledger", rb.CODE_LEDGER_COLS, ledger_rows)
     text += "\n### Witness outcomes\n\n" + rb.md_table(
         rb.WITNESS_OUTCOME_COLS, list(outcome_rows))
@@ -68,14 +69,59 @@ def _shard_text(ledger_rows, outcome_rows=(), mf_records=(), probe_records=()):
         text += rb.md_table(rb.PROBE_VERIFICATION_COLS, list(probe_records)) + "\n"
     if not mf_records and not probe_records:
         text += "No verification records.\n"
+    # U13: the comment-closure block is required iff a mapped `not_error` row is
+    # present.  These fixtures anchor at comment-free spans, so the mechanical
+    # expected set is empty and the block carries no rows.
+    verdict_index = rb.CODE_LEDGER_COLS.index("Verdict")
+    if any(row[verdict_index] == "not_error" for row in ledger_rows):
+        text += "\n### Comment closure\n\n" + rb.md_table(
+            _lint_mod_closure_cols(), list(closure_rows or []))
     text += "\n### Footer dispositions\n\n" + rb.md_table(rb._lint_mod.FOOTER_COLS, [])
     return text
 
 
+def _lint_mod_closure_cols():
+    return rb._lint_mod.COMMENT_CLOSURE_COLS
+
+
+DU_ARTIFACT_COLS = [
+    "Bundle ID", "Witness ID", "Identity Tuple", "Variable", "Producer Shape",
+    "Definition Site", "Producer Statement", "Consumer Site",
+    "Consumer Statement", "Full Guard", "Code/Comment Context",
+    "Obligation Question",
+]
+
+
+def _du_artifact_for(source, witness, anchor):
+    """A one-row DU artifact whose span collapses onto the mapped anchor."""
+    row = [f"`{source}`", f"`{witness}`", "`(identity)`", "probe_flag",
+           "boolean_gen", f"`{anchor}`", "`gen probe_flag = 1`", f"`{anchor}`",
+           "`keep if probe_flag == 1 & wave == 1`",
+           "`probe_flag == 1 & wave == 1`", "context", "review narrowing"]
+    return (
+        "# Stata definition/use bundles\n\n## Scan summary\n\n"
+        "- Stata files scanned: 1\n"
+        "- Standard producer groups (file + gen line + variable): 1\n"
+        "- Standard candidates: 1\n- Advisory candidates: 0\n\n"
+        "## Candidate findings\n\n" + rb.md_table(DU_ARTIFACT_COLS, [row])
+        + "\n## Advisory candidates\n\n" + rb.md_table(DU_ARTIFACT_COLS, []))
+
+
+MANIFEST_CHECK_STUB = (
+    "# Manifest check\n\n"
+    "| Source ID | Manifest | Format | Consumer Role | Witness Count |\n"
+    "| --- | --- | --- | --- | --- |\n"
+    f"| `{MF_SOURCE}` | `environment` | yaml | unknown | 1 |\n")
+
+
 def _probe_record(source=DU_SOURCE, witness=DU_WITNESS, record_id="VR-0001",
-                  harness="probe.py"):
-    return ["DU", record_id, source, witness, "probe exits successfully",
-            harness, "accepted", "do/probe.do:1"]
+                  harness="probe.py", channel="DU", excluded=None):
+    # U13: the probe-typed schema declares whether the probe exercised the
+    # guard-excluded class -- DU owes `yes`, every other probe channel `na`.
+    if excluded is None:
+        excluded = "yes" if channel == "DU" else "na"
+    return [channel, record_id, source, witness, "probe exits successfully",
+            harness, "accepted", "do/probe.do:1", excluded]
 
 
 def _mf_record(path, source=MF_SOURCE, witness=MF_WITNESS,
@@ -100,12 +146,25 @@ def _case(tmp_path, *, channel="DU", verdict="confirmed_error",
     etype = {"DU": "sample_filter_or_flag_error",
              "PD": "stale_or_wrong_path"}.get(channel,
                                               "version_or_dependency_error")
-    path = root / anchor.rsplit(":", 1)[0]
+    path = root / anchor.split("@", 1)[0].rsplit(":", 1)[0]
     path.parent.mkdir(parents=True, exist_ok=True)
     if channel == "DU":
         path.write_text("display 1\n", encoding="utf-8")
     elif not path.exists():
         path.write_text("name: legal\ndependencies: []\n", encoding="utf-8")
+    # U13 validates every span coordinate against the file's real line count,
+    # so a synthetic anchor must actually name a line that exists.
+    anchor_line = int(anchor.split("@", 1)[0].rsplit(":", 1)[1])
+    body = path.read_text(encoding="utf-8").splitlines()
+    if len(body) < anchor_line:
+        filler = "pass" if path.suffix == ".py" else "padding: 1"
+        body += [filler] * (anchor_line - len(body))
+        path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    if channel == "DU":
+        a.write("_run/definition_use_bundles.md",
+                _du_artifact_for(source, witness, anchor))
+    if channel == "MF":
+        a.write("_run/manifest_check.md", MANIFEST_CHECK_STUB)
     a.write_manifest(stages={
         "code_b5": {"status": "done", "retries": 0,
                     "shards": {"audit/_code_error_recheck/k1.md":

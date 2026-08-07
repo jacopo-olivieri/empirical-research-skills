@@ -793,7 +793,7 @@ For mechanically mapped rows, use this complete matrix:
 | Verdict | Proposed Status | Proposed Severity | Required / forbidden |
 | --- | --- | --- | --- |
 | `confirmed_error` | `confirmed` | 1–4 | accepted type and mechanism; every witness; no duplicate target |
-| `not_error` | `not_error` | `—` | a verification record for every mapped channel/source/witness; no duplicate target |
+| `not_error` | `not_error` | `—` | a verification record for every mapped channel/source/witness; a complete `### Comment closure` block over every mapped key's span; no `contradicts_guard`; no duplicate target |
 | `duplicate` | `duplicate_of:<mapped ID>` | `—` | mapped target, matching accepted type/mechanism, every transferred witness |
 | `confirmation_needed` | `confirmation_needed` | 1–4 | blocker-shaped note; no duplicate target; detector-minted rows also record the materiality ruling below |
 | `blocked` | `blocked` | carried forward | documented attempted-check blocker; no witness outcomes |
@@ -823,7 +823,10 @@ characters with `mechanism_schema.encode_cell`; never write canonical mechanism 
 `MIXED`. Under `### Verification records`, use the MF/PD or DU/CV channel-typed schema defined in
 the worker contract — a PD dismissal attests the resolved target's existence, path, and digest, so
 it uses the MF-typed digest schema alongside MF. A DU/CV dismissal names a runnable probe stored
-beside the shard.
+beside the shard. The probe-typed schema ends with `Excluded-Class Input`: every DU dismissal probe
+carries at least one synthetic row from the guard-**excluded** class and declares `yes`, justifying
+that row's outcome in `Observed Result`; every other probe-schema channel (CV and AC today)
+declares `na`.
 
 Manifest adjudication severity guidance:
 
@@ -835,6 +838,61 @@ Manifest adjudication severity guidance:
 
 An `unknown` consumer uses the ordinary rubric. Bound usability checks by the existing per-check
 compute budget.
+
+### Comment closure
+
+Before `not_error` may be written on a mechanically mapped row, the worker accounts for every
+in-span intent statement. Emit exactly **one** `### Comment closure` marker holding one table:
+
+| Channel | Source ID | Witness ID | Comment Site | Quoted Text | Verdict | Basis |
+| --- | --- | --- | --- | --- | --- | --- |
+
+The block is required **iff** the shard holds at least one mechanically mapped `not_error` ledger
+row, and forbidden otherwise; when required it may still hold zero data rows.
+
+Write **one row per physical line** of each selected comment block. The unique row identity is
+`(Channel, Source ID, Witness ID, Comment Site)`; `Comment Site` is `<file>:<line>` with the
+audited file's repo-relative path and its 1-based physical line. `Quoted Text` is that raw source
+line with outer whitespace stripped, percent-escaped with `mechanism_schema.encode_cell`; the lint
+decodes it and compares it against the file's line at exactly that site, itself stripped. `Basis`
+is one short statement of why the verdict holds and is never empty. Quoting more than the expected
+set is always legal, provided every extra row names a mapped key, carries a closed verdict and a
+non-empty basis, and verifies at its own site.
+
+**Spans.** DU: the definition line through the consumer line inclusive, plus the contiguous comment
+block directly above the definition line, with both borders taken from the definition/use
+artifact's `Definition Site` / `Consumer Site`. MF, CV, AC, PD: the `Site Anchor` statement, plus
+the contiguous comment block directly above it, plus any trailing same-line comment. Anchor grammar
+is per channel: MF, CV, and PD anchors read `<file>:<line>`; AC anchors read
+`<file>:<line>@call=<n>`. MF and CV anchors alone may instead carry no line coordinate — a bare
+manifest name, or a content anchor such as the `cv_scan.md` verdict digest — and such an anchor
+names no span, so it contributes no mechanical expectation instead of refusing the gate. Every
+other channel, and any MF or CV anchor that does name a line, still fails closed on a coordinate
+that does not parse or falls outside the file. Selection is **block-level** — a `/* ... */` extent, a maximal run of
+comment-only lines, a trailing comment on its code line, or a Stata `label variable` / `label
+define` statement — and a block is selected when any relevant name appears in it as a full token
+(word-boundary, case-sensitive). A file whose suffix is outside `.do`/`.ado`/`.py`/`.R`/`.r`
+contributes no mechanical expectation; reading its comments remains a prompt duty.
+
+**Verdicts** are closed, three words:
+
+| Verdict | Meaning |
+| --- | --- |
+| `consistent` | The comment agrees with the guard's actual effect. |
+| `contradicts_guard` | The comment makes a claim the guard's effect does not agree with. |
+| `unrelated` | The comment says nothing about the guard either way. |
+
+Any `contradicts_guard` row **forbids** `not_error` on every ledger row whose mapped-key set
+contains that row's key; the minimum verdict there is `confirmation_needed`. "The guard" is the
+mechanically checked proposition the dismissal rests on, per channel:
+
+| Channel | The guard |
+| --- | --- |
+| DU | the consumer's guard expression |
+| CV | the checked convention at the anchor |
+| AC | the argument contract at the anchored call |
+| MF | the manifest expectation the witness records |
+| PD | the asserted path resolution |
 
 ### Evidence levels (tied to the review ladder)
 
