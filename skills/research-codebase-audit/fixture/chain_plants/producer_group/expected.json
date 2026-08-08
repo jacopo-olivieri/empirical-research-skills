@@ -1,0 +1,94 @@
+{
+  "class": "producer_group",
+  "run8_id": "E-0302",
+  "signature": [
+    [
+      "exceed_any",
+      "exceed any",
+      "exceedance flag"
+    ],
+    [
+      "overwrit",
+      "erase",
+      "clobber",
+      "replaces",
+      "reset",
+      "last iteration",
+      "final iteration",
+      "not accumulat",
+      "no accumulat",
+      "assignment rather than",
+      "instead of accumulat"
+    ],
+    [
+      "loop",
+      "foreach",
+      "iteration",
+      "ozone"
+    ]
+  ],
+  "statuses": [
+    "confirmed"
+  ],
+  "min_severity": 2,
+  "workbook": {
+    "sheets": [
+      "Overview",
+      "Paper Claims",
+      "Code Errors"
+    ],
+    "paper_claims_visible": [
+      "Claim ID",
+      "Paper Context",
+      "Paper Quote",
+      "Claim Type",
+      "Claim Text",
+      "Code/Data Source",
+      "Status",
+      "Potential Issue",
+      "Severity",
+      "Issue Description",
+      "Related Error IDs"
+    ],
+    "paper_claims_hidden_absent": [
+      "Used in Text",
+      "Output IDs",
+      "Blocked Check"
+    ],
+    "code_errors_headers": [
+      "Error ID",
+      "Error Type",
+      "Code/Data Source",
+      "Code Location",
+      "Status",
+      "Severity",
+      "Error Description",
+      "Why It Matters",
+      "Related Claim IDs"
+    ]
+  },
+  "effort_map": {
+    "codemap": "medium",
+    "claims_b1_planner": "medium",
+    "claims_b2_section": "medium",
+    "claims_b3_merge": "medium",
+    "claims_b3c_conventions": "medium",
+    "claims_b3b_second_read": "medium",
+    "claims_b3b_merge": "medium",
+    "claims_adjudication": "medium",
+    "claims_adjudication_lineage": "medium",
+    "claims_b5_recheck_cluster": "medium",
+    "claims_b6_merge": "medium",
+    "code_b1_planner": "medium",
+    "code_b2_chunk": "medium",
+    "code_b3_merge": "medium",
+    "b3d_conventions_scan": "medium",
+    "code_b3b_second_read": "medium",
+    "code_b3b_merge": "medium",
+    "code_b5_recheck_cluster": "medium",
+    "code_b6_merge": "medium",
+    "b7_cross_linker": "medium",
+    "b7_claim_recheck": "medium",
+    "b8_rewriter": "low"
+  }
+}

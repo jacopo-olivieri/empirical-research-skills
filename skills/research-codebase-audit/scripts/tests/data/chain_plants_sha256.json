@@ -1,0 +1,23 @@
+{
+  "comment_closure/expected.json": "03824da58ad1c48f22cf8f89e651428f16ed41ecb98466cd0eefb364f81c25ce",
+  "comment_closure/package/README.md": "9afc3e620d8e797d91b19f21c8de2fa04255cd87baad4ab9aa667e255b24288e",
+  "comment_closure/package/artifacts/tab1.tex": "e1bac2aa81ff7602701a2473e75c0620a18a181c43d81d809bce990f7d69fc48",
+  "comment_closure/package/data/students.csv": "90600d8ea7b4e43dfc7c536b620cc87351141be9d5e6c9d560f79b5137ae6b14",
+  "comment_closure/package/do/build_sample.do": "3132121298977e095fd00b0328b84dff9bb87a018bfad6c2408ec4cfabe8d3a4",
+  "comment_closure/package/do/make_tab1.do": "30a46c12fe0c5880c7f4f869ce708db04b9884f2cc8fd2ed7ecd948d59cbe52e",
+  "comment_closure/package/paper/paper.md": "516d7cae24211b6e6b1203bfa9d3bfc092cc89727da253acde55a16429a8c4ce",
+  "path_derivation/expected.json": "09b0133f2b967b2fd9a5c34ec4d7a6fa1f8e04f18a7b9130a5d68338580a1678",
+  "path_derivation/package/README.md": "077be83c7a6f78646af379c441f386031e8e0835d1fe3578f1b55b43d5f3e332",
+  "path_derivation/package/artifacts/totals.txt": "9e6d5864df4c182b9c5600839f62214dbf252ece4a76d8a9c90a576b0113cd90",
+  "path_derivation/package/data/loans.csv": "9b87810081cf834f847601de1626605ae99da9b30f2d8bc593910380b5d8dfaa",
+  "path_derivation/package/loans.csv": "92fc00e0fcb573dfd4a474e486850361a6ad4b85d52dc757237cf54ed3948d82",
+  "path_derivation/package/paper/paper.md": "e278f13af2b25fcbd6cdc41cf0fade1a28e4b767784171638129b41bc869c99e",
+  "path_derivation/package/py/tools/make_totals.py": "a9116bb09ca47cfa654151abbb3f3f00cf3d22543b4d09ecce44eccb0546c608",
+  "producer_group/expected.json": "b7aa278dbacdb3f7099803de27c9633b673bf1641ed832c201625d6e47a3f5fe",
+  "producer_group/package/README.md": "209dd20e39e9993844dcc0836a8b6505ad69b04b8f82894e17c6795e4ff40e4f",
+  "producer_group/package/artifacts/tab1.tex": "c530a7752fe294cae5c3d05ce8f9615911eda8e7f9b7b86373b79412d894fc64",
+  "producer_group/package/data/readings.csv": "6ebd1ca2cfe91e859bd4e6e0274da31aaf7f10e4099c8c1de009c610cd698ac7",
+  "producer_group/package/do/build_flags.do": "97206acb9d83e79090c12bcba8953ab7899840216c3aa48307fd395b06cc34e4",
+  "producer_group/package/do/make_tab1.do": "aceb1ed89f334db02967499d2fdd453835d41ad261d33b9e4bd99c00ee87fdf5",
+  "producer_group/package/paper/paper.md": "22865843ab1fae4cf400c1e2f88ec748c7e4a83922a5bffd6bdf48311e19e521"
+}

@@ -57,3 +57,7 @@ def pytest_configure(config):
         "markers", "u17: unit U17 — Opus 5 + medium-effort defaults and the "
         "author-facing workbook cut (three sheets, 11 visible Paper Claims "
         "columns, independent b9 hidden-column mirror)")
+    config.addinivalue_line(
+        "markers", "u18: unit U18 — campaign-close chain plants and their "
+        "scorer (three fail-closed gate legs: register pass condition, "
+        "workbook shape, effort map; plant-tree drift protection)")
