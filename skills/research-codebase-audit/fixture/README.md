@@ -146,6 +146,16 @@ scorer output in the dated scorecard either way. Dated scorecards
 records kept locally under `docs/rca-scorecards/`; they are not committed to
 this fixture directory.
 
+## Chain plants (campaign-close verification)
+
+`chain_plants/` holds three separate mini-packages — one per run-8
+gate-failing code miss class — run unstubbed through the production
+pipeline at campaign close and scored by `scripts/score_chain_plants.py`.
+They are campaign-close verification, separate from this 28-plant
+regression fixture; the re-scoring rules in this README do not apply to
+them. See `chain_plants/README.md` for the run protocol, the pass
+condition, and the pre-registered run-9 success definition.
+
 ## Test harness
 
 The scripts' committed pytest suite (linter contract tests, scorer self-tests,
