@@ -89,12 +89,15 @@ defaults and let the user correct.
    folders. Record the final exclusion list.
 6. **Known context.** Anything the user already knows: fragile areas, known issues, restricted
    data, quirks (e.g. mirror folders that are import-only).
-7. **Output preferences and worker model tier** (default: inherit the session model).
+7. **Output preferences and worker model tier** (default: `opus`, the latest Opus — Opus 5.5
+   at the time of writing). The user may instead choose `inherit` (use the session model) or
+   another alias: `sonnet`, `haiku`, or `fable`. Reject any other value, such as a full model
+   ID, because dispatch accepts only these aliases.
 8. **Effort exceptions.** Offer the fixed default map: every dispatch role runs at `medium`
    except `b8_rewriter`, which runs at `low`. Ask only for exceptions: “name any role you
    want moved.” Legal tiers are `low`, `medium`, `high`, `xhigh`, and `max`. The resulting map is
    written once at intake and never edited; changing effort later requires a fresh run.
-9. **Launch requirements.** A long run is certainly interrupted, so check two things before
+9. **Launch requirements.** A long run is certainly interrupted, so check these before
    any stage work and record the outcome either way.
    - **Retry watchdog.** Verify `CLAUDE_CODE_RETRY_WATCHDOG=1` is set in the session
      environment (`echo "${CLAUDE_CODE_RETRY_WATCHDOG:-unset}"`). It makes a usage-limit stop
@@ -109,6 +112,8 @@ defaults and let the user correct.
      the Claude Code statusline command at `scripts/usage_statusline.py` — and record a
      `warnings` entry if they decline. The run still works without it; only the proactive
      wave-boundary pause degrades to "no data, no hold".
+   - **Session model.** The conductor runs on the session model, which the skill cannot change.
+     If the session is not on Opus, record a `warnings` entry and continue; do not block.
 
 Write `audit/_run/manifest.json`:
 
@@ -122,7 +127,7 @@ Write `audit/_run/manifest.json`:
   "scope_exclusions": [],
   "known_context": "…",
   "output_prefs": "…",
-  "worker_model": "inherit",
+  "worker_model": "opus",
   "effort_map": {
     "codemap": "medium",
     "claims_b1_planner": "medium", "claims_b2_section": "medium",
@@ -273,7 +278,9 @@ Mechanics:
   manifest each time so an unsupervised run stays legible without reading the pipeline files.
 - **Effort-keyed dispatch.** Resolve the dispatch role in the table below, read its tier from the
   manifest `effort_map`, and dispatch through `rca-carrier-<tier>` while continuing to use the
-  user's `worker_model`; model and effort are orthogonal. Begin every worker prompt with
+  user's `worker_model`; model and effort are orthogonal. A named `worker_model` (such as
+  `opus`) is passed as the model on every dispatch; `inherit` passes no model, so the carrier's
+  `model: inherit` applies. Begin every worker prompt with
   `RCA-DISPATCH role=<role-key> stage=<stage-key>` so the observation hook can recover aggregate
   stage/role counts. Append the dispatch immediately with `scripts/dispatch_tracking.py record`
   (role, carrier, stage, shard-or-artifact, and monotone sequence number) to

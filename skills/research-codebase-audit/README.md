@@ -143,7 +143,7 @@ Providing project context is optional. It does not exclude other materials from 
 
 #### 6. Model and Reasoning Effort
 
-Configure the model and reasoning effort used by the audit subagents. If you do not specify a model, the subagents use the model selected for the current Claude Code session. For the strongest review, run the session on Opus 5, or set the worker model to `opus` during setup.
+Configure the model and reasoning effort used by the audit subagents. By default, the subagents run on the latest Opus model (Opus 5.5 at the time of writing), whatever model the current Claude Code session uses. To use the session's model instead, set the worker model to `inherit` during setup, or choose another model alias (`sonnet`, `haiku`, or `fable`). The audit coordinator always runs on the session model, so setup records a warning if the session is not on Opus.
 
 Reasoning effort is set separately for each audit stage and does not inherit the current session setting. The audit uses the defaults below.
 
